@@ -38,6 +38,7 @@ in-flight workflows from their last checkpoint when it next launches.
 - **Recovery** — interrupted workflows automatically resume on `Launch`.
 - **Management APIs** — `ListWorkflows`, `CancelWorkflow`, `ResumeWorkflow`, `ForkWorkflow`, `DeleteWorkflows`.
 - **Admin HTTP handler** — `orc.AdminHandler(ctx)` returns a `http.Handler` you can mount under any prefix in your own `net/http` mux for live monitoring, cancel/resume/fork, parent/child tree inspection, and per-workflow durations.
+- **Bundled web dashboard** — `web.Handler("/admin")` from the `ella.to/orc/web` sub-package serves a single-file HTML/JS UI that talks to the admin handler — paginated workflow list with filters, live status counters, per-workflow detail with steps/children/tree, and stop / restart / fork / delete buttons. No build step, no external assets.
 - **Single binary** — only dependency at runtime is the SQLite file.
 
 ---
@@ -108,6 +109,7 @@ func main() {
 | **Recovery**       | Implicit at `Launch`                                    | Picks up `PENDING` workflows + `ENQUEUED` workflows assigned to this `ExecutorID`.   |
 | **Management**     | `orc.ListWorkflows`, `CancelWorkflow`, `ResumeWorkflow`, `ForkWorkflow`, `DeleteWorkflows`, `RetrieveWorkflow`, `GetWorkflowSteps` | Programmatic admin. |
 | **Admin HTTP**     | `orc.AdminHandler(ctx)`                                 | A `net/http` handler that exposes all of the above as a JSON API.                    |
+| **Web dashboard**  | `ella.to/orc/web` → `web.Handler(apiBase)`              | Embedded single-file HTML/JS UI for the admin API. Mount alongside `AdminHandler`.   |
 
 ---
 
@@ -555,9 +557,14 @@ for i := 0; i < 10; i++ {
 }
 ```
 
-### Example 14 — Mounting the admin HTTP server
+### Example 14 — Mounting the admin HTTP server (and the web dashboard)
 
 ```go
+import (
+    "ella.to/orc"
+    "ella.to/orc/web"
+)
+
 ctx, _ := orc.NewContext(context.Background(), orc.Config{
     AppName:      "admin-demo",
     DatabasePath: "admin-demo.db",
@@ -568,25 +575,34 @@ orc.RegisterWorkflow[string, string](ctx, longJob, orc.WithWorkflowName("long_jo
 _ = orc.Launch(ctx)
 
 mux := http.NewServeMux()
+
+// JSON admin API.
 mux.Handle("/admin/", http.StripPrefix("/admin",
     orc.AdminHandler(ctx, orc.WithAdminPrettyJSON()),
 ))
+
+// Bundled HTML/JS dashboard. The argument is the URL prefix at which the
+// admin handler above is mounted; the UI calls "{apiBase}/workflows", etc.
+mux.Handle("/ui/", http.StripPrefix("/ui", web.Handler("/admin")))
+
 log.Fatal(http.ListenAndServe(":8080", mux))
 ```
 
 Then:
 
 ```bash
-curl http://localhost:8080/admin/                       # route index
-curl http://localhost:8080/admin/info                   # registered workflows + queue summary
-curl http://localhost:8080/admin/workflows              # list everything
-curl http://localhost:8080/admin/workflows/job-1        # detail (status, duration, steps, children)
-curl http://localhost:8080/admin/workflows/job-1/tree   # parent + descendants as a tree
-curl -X POST http://localhost:8080/admin/workflows/job-1/cancel
-curl -X POST http://localhost:8080/admin/workflows/job-1/resume
+open  http://localhost:8080/ui/                         # web dashboard
+curl  http://localhost:8080/admin/                      # route index
+curl  http://localhost:8080/admin/info                  # registered workflows + queue summary
+curl  http://localhost:8080/admin/workflows             # list everything
+curl  http://localhost:8080/admin/workflows/job-1       # detail (status, duration, steps, children)
+curl  http://localhost:8080/admin/workflows/job-1/tree  # parent + descendants as a tree
+curl  -X POST http://localhost:8080/admin/workflows/job-1/cancel
+curl  -X POST http://localhost:8080/admin/workflows/job-1/resume
 ```
 
-See [Admin HTTP server](#admin-http-server) below for the full route table.
+See [Admin HTTP server](#admin-http-server) below for the full route table,
+and [Web dashboard](#web-dashboard) for the UI.
 
 ### Example 15 — Listing & filtering workflows
 
@@ -682,8 +698,9 @@ All parameters are optional and may be combined.
 | `id`       | repeatable string                            | Return only workflows whose id is in this set. Repeat for multiple ids.              |
 | `start`    | RFC3339 timestamp                            | Filter by `created_at >= start`.                                                     |
 | `end`      | RFC3339 timestamp                            | Filter by `created_at <= end`.                                                       |
-| `limit`    | int                                          | Page size (default `100`, capped at `1000`).                                         |
-| `offset`   | int                                          | Pagination offset.                                                                   |
+| `limit`    | int                                          | Page size (default `100`, capped at `1000`). Configurable via `WithAdminDefaultListLimit` / `WithAdminMaxListLimit`. |
+| `offset`   | int                                          | Pagination offset (rows to skip). Mutually-exclusive with `page` — when both are set, `page` wins. |
+| `page`     | int (1-based)                                | Convenience alternative to `offset`. Equivalent to `offset = (page - 1) * limit`. Returns `400` for `page < 1`. |
 | `desc`     | bool (`true`/`false`)                        | Sort by `created_at` descending. Default `false` (ascending).                        |
 | `load_io`  | bool                                         | Include `input` / `output` in each row. Default `true`.                              |
 
@@ -723,6 +740,37 @@ and direct `children` (`AdminWorkflowView[]`).
 `GET /workflows/{id}/tree` returns an `AdminWorkflowTreeNode` — the same
 view embedded in a recursive `children` array.
 
+### Paginated list response — `AdminListResponse`
+
+`GET /workflows` wraps the rows in an envelope that carries everything you
+need to render a "Page X of Y · N total" UI without a second round trip:
+
+```json
+{
+  "items":     [ /* AdminWorkflowView, ... */ ],
+  "limit":     50,
+  "offset":    100,
+  "count":     50,
+  "total":     327,
+  "page":      3,
+  "page_size": 50
+}
+```
+
+| Field       | Meaning                                                                                       |
+| ----------- | --------------------------------------------------------------------------------------------- |
+| `items`     | The workflow rows for this page.                                                              |
+| `limit`     | Echo of the effective `?limit` (after defaulting and clamping).                               |
+| `offset`    | Echo of the effective offset (whether supplied as `?offset` or derived from `?page`).         |
+| `count`     | `len(items)` — the size of this batch (≤ `limit`).                                            |
+| `total`     | Total rows matching the request's filters across **all** pages.                               |
+| `page`      | 1-based current page. `(offset / limit) + 1`.                                                 |
+| `page_size` | Same as `limit`, named for symmetry with `page`.                                              |
+
+Compute the last page as `ceil(total / page_size)`. Counting uses the same
+`WHERE` clause as the list query, so totals match exactly what an
+unpaginated request would return.
+
 ### Errors
 
 Any non-2xx response has a JSON body of the form:
@@ -749,8 +797,11 @@ curl http://localhost:8080/admin/info
 # list everything that's currently in flight
 curl 'http://localhost:8080/admin/workflows?status=PENDING&status=ENQUEUED'
 
-# page through completed workflows in the last hour, newest first
-curl 'http://localhost:8080/admin/workflows?status=SUCCESS&desc=true&limit=50&start=2026-04-26T11:00:00Z'
+# paginated: page 3 of completed workflows, 50 per page, newest first
+curl 'http://localhost:8080/admin/workflows?status=SUCCESS&desc=true&limit=50&page=3'
+
+# equivalent using offset
+curl 'http://localhost:8080/admin/workflows?status=SUCCESS&desc=true&limit=50&offset=100'
 
 # detail for one workflow (status + steps + children + duration)
 curl http://localhost:8080/admin/workflows/parent-1
@@ -778,6 +829,71 @@ curl -X POST -d '{"ids":["job-1","job-2"]}' \
 
 A complete runnable example with seeded workflows lives in
 [`examples/14-admin-http`](./examples/14-admin-http).
+
+---
+
+## Web dashboard
+
+`ella.to/orc/web` is a tiny sub-package whose only public symbol is:
+
+```go
+func Handler(apiBase string) http.Handler
+```
+
+It returns an `http.Handler` that serves a single, embedded `index.html`
+containing the full ORC admin UI (HTML + CSS + JS, no external assets,
+no build step). The page uses hash routing, so any unknown sub-path
+(`/ui/foo/bar`) still serves the same document and the client takes over
+from there.
+
+`apiBase` is the URL prefix at which `orc.AdminHandler` is mounted —
+the UI calls `{apiBase}/workflows`, `{apiBase}/info`, etc. Pass an empty
+string to default to `"/admin"`. The value is baked into the served HTML
+once at handler-construction time; it can also be overridden at runtime
+with the `?api=/some/path` query string (handy when the UI is opened from
+a different origin).
+
+### Mounting alongside the admin handler
+
+```go
+import (
+    "ella.to/orc"
+    "ella.to/orc/web"
+)
+
+mux := http.NewServeMux()
+mux.Handle("/admin/", http.StripPrefix("/admin", orc.AdminHandler(ctx)))
+mux.Handle("/ui/",    http.StripPrefix("/ui",    web.Handler("/admin")))
+http.ListenAndServe(":8080", mux)
+```
+
+Open <http://localhost:8080/ui/> in a browser.
+
+### What it shows
+
+- **Top bar** with app name, executor id, configured API base, a
+  health dot, and an auto-refresh toggle (default on, 2 s polling).
+- **Workflows list** with:
+  - Status counters at the top (click a counter to filter).
+  - Filters: status (multi-select), name, queue, page size — all
+    persisted in the URL search params.
+  - Pagination: First / Prev / Next / Last + a "Go to: N" jump input,
+    showing `Page X of Y · N total · K per page`. Auto-redirects to
+    the last valid page if data shrinks underneath you.
+  - Live-ticking "Duration" for `PENDING` rows; frozen "Duration" for
+    terminal rows; relative "Created" timestamp.
+- **Workflow detail** — full metadata, action buttons (**Stop /
+  Cancel**, **Restart / Resume**, **Fork…**, **Delete**), checkpointed
+  steps with output/error, direct children (clickable), input/output
+  JSON panes, and a descendant tree.
+- **Queues** — registered queues with worker/global concurrency, rate
+  limit, and live pending/running counts. Click a queue to jump to a
+  queue-filtered workflow list.
+- **Info** — executor info and registered workflow names.
+
+> **Authentication and authorization are out of scope** for the web
+> handler too — protect both `AdminHandler` and `web.Handler` behind a
+> reverse proxy or middleware before exposing them externally.
 
 ---
 
@@ -831,8 +947,9 @@ simplicity:
   `NotificationPollInterval`.
 - **No Conductor cloud client, no streams, no patching system, no
   debouncer, no CLI.** These can be layered on top. (orc *does* ship a
-  built-in admin HTTP handler — see [Admin HTTP server](#admin-http-server)
-  below.)
+  built-in admin HTTP handler and a bundled web dashboard — see
+  [Admin HTTP server](#admin-http-server) and
+  [Web dashboard](#web-dashboard) below.)
 
 If you need any of those, build them above the public API; the durable
 substrate is the same.

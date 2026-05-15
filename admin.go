@@ -165,11 +165,24 @@ type AdminInfo struct {
 }
 
 // AdminListResponse is the response for GET /workflows.
+//
+// The pagination model is offset/limit-based:
+//
+//   - Limit / Offset are echoed back from the request (after defaulting and
+//     clamping).
+//   - Count is the number of items returned in this batch (i.e. len(Items)).
+//   - Total is the number of rows matching the request's filters across all
+//     pages. Use it to compute the page count as ceil(Total / Limit).
+//   - Page and PageSize are convenience fields derived from Offset and Limit
+//     (Page is 1-based) so clients don't have to re-compute them.
 type AdminListResponse struct {
-	Items  []AdminWorkflowView `json:"items"`
-	Limit  int                 `json:"limit"`
-	Offset int                 `json:"offset"`
-	Count  int                 `json:"count"`
+	Items    []AdminWorkflowView `json:"items"`
+	Limit    int                 `json:"limit"`
+	Offset   int                 `json:"offset"`
+	Count    int                 `json:"count"`
+	Total    int                 `json:"total"`
+	Page     int                 `json:"page"`
+	PageSize int                 `json:"page_size"`
 }
 
 // AdminForkRequest is the request body for POST /workflows/{id}/fork.
@@ -290,7 +303,7 @@ func (a *adminAPI) handleIndex(w http.ResponseWriter, r *http.Request) {
 	routes := []route{
 		{"GET", "/health", "liveness probe"},
 		{"GET", "/info", "executor info, registered workflows, queue summaries, status counts"},
-		{"GET", "/workflows", "list workflows (filters: status, name, queue, executor, id, start, end, limit, offset, desc, load_io)"},
+		{"GET", "/workflows", "list workflows (filters: status, name, queue, executor, id, start, end; pagination: limit, offset, page; sort: desc; payload: load_io). Response includes page, page_size and total."},
 		{"GET", "/workflows/{id}", "workflow detail (status + duration + steps + direct children)"},
 		{"DELETE", "/workflows/{id}", "delete a single workflow and dependent rows"},
 		{"GET", "/workflows/{id}/steps", "list checkpointed steps"},
@@ -371,6 +384,11 @@ func (a *adminAPI) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, http.StatusBadRequest, httpErr)
 		return
 	}
+	total, err := a.ctx.systemDB.countWorkflows(a.ctx.ctx, in)
+	if err != nil {
+		a.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	ws, err := a.ctx.systemDB.listWorkflows(a.ctx.ctx, in)
 	if err != nil {
 		a.writeError(w, http.StatusInternalServerError, err)
@@ -381,11 +399,18 @@ func (a *adminAPI) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 	for i := range ws {
 		items = append(items, toView(&ws[i], now))
 	}
+	page := 1
+	if in.Limit > 0 {
+		page = (in.Offset / in.Limit) + 1
+	}
 	a.writeJSON(w, http.StatusOK, AdminListResponse{
-		Items:  items,
-		Limit:  in.Limit,
-		Offset: in.Offset,
-		Count:  len(items),
+		Items:    items,
+		Limit:    in.Limit,
+		Offset:   in.Offset,
+		Count:    len(items),
+		Total:    total,
+		Page:     page,
+		PageSize: in.Limit,
 	})
 }
 
@@ -411,6 +436,15 @@ func (a *adminAPI) parseListInput(r *http.Request) (listWorkflowsInput, error) {
 			return listWorkflowsInput{}, fmt.Errorf("invalid offset: %q", v)
 		}
 		offset = n
+	}
+	// `page` is a 1-based convenience that overrides `offset` when present.
+	// Pages of size `limit` are computed as offset = (page-1) * limit.
+	if v := q.Get("page"); v != "" {
+		p, err := strconv.Atoi(v)
+		if err != nil || p < 1 {
+			return listWorkflowsInput{}, fmt.Errorf("invalid page: %q", v)
+		}
+		offset = (p - 1) * limit
 	}
 
 	in := listWorkflowsInput{

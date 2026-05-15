@@ -290,7 +290,11 @@ func (s *sqliteSystemDB) scanWorkflowRow(stmt *sqlite.Stmt, loadIO bool) (*Workf
 	return ws, nil
 }
 
-func (s *sqliteSystemDB) listWorkflows(ctx context.Context, in listWorkflowsInput) ([]WorkflowStatus, error) {
+// listWorkflowsWhere builds the WHERE clause + bind args for the
+// filter portion of listWorkflowsInput. Used by both listWorkflows
+// and countWorkflows so that totals match what a paginated list
+// request would return.
+func listWorkflowsWhere(in listWorkflowsInput) (string, []any) {
 	var (
 		conds []string
 		args  []any
@@ -337,6 +341,11 @@ func (s *sqliteSystemDB) listWorkflows(ctx context.Context, in listWorkflowsInpu
 	if len(conds) > 0 {
 		where = "WHERE " + strings.Join(conds, " AND ")
 	}
+	return where, args
+}
+
+func (s *sqliteSystemDB) listWorkflows(ctx context.Context, in listWorkflowsInput) ([]WorkflowStatus, error) {
+	where, args := listWorkflowsWhere(in)
 	order := "ASC"
 	if in.SortDescending {
 		order = "DESC"
@@ -385,6 +394,31 @@ func (s *sqliteSystemDB) listWorkflows(ctx context.Context, in listWorkflowsInpu
 		return nil, wrapError(ErrUnknown, err, "list workflows")
 	}
 	return out, nil
+}
+
+func (s *sqliteSystemDB) countWorkflows(ctx context.Context, in listWorkflowsInput) (int, error) {
+	where, args := listWorkflowsWhere(in)
+	q := "SELECT COUNT(*) AS n FROM workflow_status " + where + ";"
+	var n int
+	err := s.db.Exec(ctx, func(ctx context.Context, conn *sqlite.Conn) error {
+		stmt, err := conn.Prepare(ctx, q, args...)
+		if err != nil {
+			return err
+		}
+		defer stmt.Reset()
+		hasRow, err := stmt.Step()
+		if err != nil {
+			return err
+		}
+		if hasRow {
+			n = int(stmt.GetInt64("n"))
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, wrapError(ErrUnknown, err, "count workflows")
+	}
+	return n, nil
 }
 
 func (s *sqliteSystemDB) updateWorkflowStatus(ctx context.Context, in updateWorkflowStatusInput) error {

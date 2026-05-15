@@ -1,0 +1,1317 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ORC Admin</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #161a22;
+      --panel-2: #1c2230;
+      --border: #232a39;
+      --text: #e6e9ef;
+      --muted: #8a93a6;
+      --link: #6aa9ff;
+      --accent: #6aa9ff;
+      --ok: #3ddc97;
+      --warn: #f5a524;
+      --err: #ff6b6b;
+      --info: #6aa9ff;
+      --neutral: #8a93a6;
+      --shadow: 0 1px 0 rgba(255,255,255,0.04), 0 8px 24px rgba(0,0,0,0.3);
+      --radius: 8px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f6f7fb;
+        --panel: #ffffff;
+        --panel-2: #f1f3f9;
+        --border: #e3e7ef;
+        --text: #1a2030;
+        --muted: #5c6577;
+        --link: #2563eb;
+        --accent: #2563eb;
+        --shadow: 0 1px 0 rgba(0,0,0,0.02), 0 8px 24px rgba(20,30,60,0.08);
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    a { color: var(--link); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    button {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    button:hover { border-color: var(--accent); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+    button.danger  { background: transparent; border-color: var(--err); color: var(--err); }
+    button.warn    { background: transparent; border-color: var(--warn); color: var(--warn); }
+    button.ok      { background: transparent; border-color: var(--ok);   color: var(--ok); }
+    input, select {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+    input:focus, select:focus { outline: none; border-color: var(--accent); }
+
+    header.topbar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 10px 18px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 5;
+    }
+    .brand {
+      font-weight: 700;
+      letter-spacing: .2px;
+      font-size: 15px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .brand .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px rgba(61,220,151,.18); }
+    .brand .dot.bad { background: var(--err); box-shadow: 0 0 0 3px rgba(255,107,107,.2); }
+    nav.tabs { display: flex; gap: 4px; margin-left: 8px; }
+    nav.tabs a {
+      padding: 6px 12px;
+      border-radius: 6px;
+      color: var(--muted);
+      font-weight: 500;
+    }
+    nav.tabs a.active { background: var(--panel-2); color: var(--text); }
+    .topbar .spacer { flex: 1; }
+    .topbar .meta {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+      display: flex; gap: 12px; align-items: center;
+    }
+    .topbar .meta .pill {
+      padding: 2px 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--panel-2);
+    }
+
+    main { padding: 16px; max-width: 1400px; margin: 0 auto; }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 14px 16px;
+      margin-bottom: 16px;
+    }
+    .panel h2 {
+      margin: 0 0 10px 0;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .panel h3 {
+      margin: 0 0 8px 0;
+      font-size: 14px;
+      color: var(--text);
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .toolbar label { color: var(--muted); font-size: 12px; display: flex; gap: 6px; align-items: center; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    table th, table td {
+      padding: 8px 10px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    table th {
+      color: var(--muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: .6px;
+      background: var(--panel-2);
+      position: sticky; top: 0;
+    }
+    table tr.row { cursor: pointer; }
+    table tr.row:hover td { background: var(--panel-2); }
+    .mono { font-family: var(--mono); font-size: 12px; }
+    .muted { color: var(--muted); }
+    .nowrap { white-space: nowrap; }
+    .wrap { white-space: pre-wrap; word-break: break-word; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .4px;
+      border: 1px solid transparent;
+    }
+    .badge.PENDING   { color: var(--info); background: rgba(106,169,255,.12); border-color: rgba(106,169,255,.35); }
+    .badge.ENQUEUED  { color: var(--warn); background: rgba(245,165,36,.12); border-color: rgba(245,165,36,.35); }
+    .badge.DELAYED   { color: var(--warn); background: rgba(245,165,36,.10); border-color: rgba(245,165,36,.30); }
+    .badge.SUCCESS   { color: var(--ok);   background: rgba(61,220,151,.12); border-color: rgba(61,220,151,.35); }
+    .badge.ERROR     { color: var(--err);  background: rgba(255,107,107,.12); border-color: rgba(255,107,107,.35); }
+    .badge.CANCELLED { color: var(--muted);background: rgba(138,147,166,.12); border-color: rgba(138,147,166,.35); }
+    .badge.MAX_RECOVERY_ATTEMPTS_EXCEEDED { color: var(--err); background: rgba(255,107,107,.12); border-color: rgba(255,107,107,.35); }
+
+    .spinner {
+      display: inline-block;
+      width: 12px; height: 12px;
+      border: 2px solid rgba(106,169,255,.25);
+      border-top-color: var(--info);
+      border-radius: 50%;
+      animation: spin .8s linear infinite;
+      vertical-align: -2px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    @media (max-width: 900px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+    dl.kv {
+      margin: 0;
+      display: grid;
+      grid-template-columns: 160px 1fr;
+      gap: 6px 14px;
+      font-size: 13px;
+    }
+    dl.kv dt { color: var(--muted); }
+    dl.kv dd { margin: 0; word-break: break-word; }
+
+    pre.code {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      overflow: auto;
+      font-family: var(--mono);
+      font-size: 12px;
+      max-height: 320px;
+    }
+    pre.error {
+      background: rgba(255,107,107,.08);
+      border-color: rgba(255,107,107,.35);
+      color: var(--err);
+    }
+
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    .toast {
+      position: fixed; bottom: 16px; right: 16px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      padding: 10px 14px;
+      border-radius: 6px;
+      box-shadow: var(--shadow);
+      max-width: 360px;
+      font-size: 13px;
+      animation: slideIn .15s ease-out;
+      z-index: 100;
+    }
+    .toast.err { border-left-color: var(--err); }
+    .toast.ok  { border-left-color: var(--ok); }
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .empty {
+      padding: 24px;
+      text-align: center;
+      color: var(--muted);
+    }
+
+    .stats { display: flex; gap: 12px; flex-wrap: wrap; }
+    .stat {
+      flex: 1 1 140px;
+      padding: 12px 14px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      min-width: 120px;
+    }
+    .stat .label {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+      min-height: 2.5em; /* keep cards aligned when some labels wrap to 2 lines */
+    }
+    .stat .value { font-size: 20px; font-weight: 700; margin-top: 4px; }
+
+    .tree { font-family: var(--mono); font-size: 12px; }
+    .tree ul { list-style: none; padding-left: 18px; margin: 0; border-left: 1px dashed var(--border); }
+    .tree li { padding: 2px 0; }
+
+    /* small-screen tweaks */
+    @media (max-width: 700px) {
+      header.topbar { flex-wrap: wrap; gap: 10px; padding: 10px 12px; }
+      .topbar .meta { width: 100%; }
+      main { padding: 10px; }
+      dl.kv { grid-template-columns: 100px 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span id="health-dot" class="dot" title="health"></span>
+    <span id="brand-name">ORC Admin</span>
+  </div>
+  <nav class="tabs">
+    <a id="tab-workflows" href="#/workflows">Workflows</a>
+    <a id="tab-queues" href="#/queues">Queues</a>
+    <a id="tab-info" href="#/info">Info</a>
+  </nav>
+  <div class="spacer"></div>
+  <div class="meta">
+    <span class="pill" id="api-base-pill" title="Admin API base path">api: …</span>
+    <span class="pill" id="executor-pill" title="Executor ID">executor: …</span>
+    <label class="pill" style="cursor:pointer; user-select:none;">
+      <input type="checkbox" id="auto-refresh" checked style="margin: 0 6px 0 0; vertical-align: -2px;" />
+      auto-refresh
+    </label>
+  </div>
+</header>
+
+<main id="view"></main>
+
+<script>
+(function () {
+  // ---------------------------------------------------------------------
+  // Config & helpers
+  // ---------------------------------------------------------------------
+  // The Go handler replaces __API_BASE__ with the actual admin path. It
+  // can also be overridden at runtime via ?api=/some/path (handy when the
+  // UI is opened from a different origin).
+  let API_BASE = "__API_BASE__";
+  const qsApi = new URLSearchParams(location.search).get("api");
+  if (qsApi) API_BASE = qsApi;
+  if (!API_BASE || API_BASE === "__API_BASE__") API_BASE = "/admin";
+  document.getElementById("api-base-pill").textContent = "api: " + API_BASE;
+
+  const POLL_MS = 2000;
+  let pollTimer = null;
+  let currentRoute = null;
+  const auto = document.getElementById("auto-refresh");
+
+  function $(sel, el) { return (el || document).querySelector(sel); }
+  function el(tag, attrs, children) {
+    const node = document.createElement(tag);
+    if (attrs) {
+      for (const [k, v] of Object.entries(attrs)) {
+        if (v == null || v === false) continue;
+        if (k === "class") node.className = v;
+        else if (k === "html") node.innerHTML = v;
+        else if (k.startsWith("on") && typeof v === "function") {
+          node.addEventListener(k.slice(2).toLowerCase(), v);
+        } else if (k === "style" && typeof v === "object") {
+          Object.assign(node.style, v);
+        } else {
+          node.setAttribute(k, v);
+        }
+      }
+    }
+    if (children == null) return node;
+    if (!Array.isArray(children)) children = [children];
+    for (const c of children) {
+      if (c == null || c === false) continue;
+      node.appendChild(typeof c === "string" || typeof c === "number"
+        ? document.createTextNode(String(c))
+        : c);
+    }
+    return node;
+  }
+  function escapeHTML(s) {
+    if (s == null) return "";
+    return String(s)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  }
+
+  function api(path, opts) {
+    return fetch(API_BASE + path, opts).then(async (r) => {
+      const text = await r.text();
+      let data = null;
+      try { data = text ? JSON.parse(text) : null; } catch {}
+      if (!r.ok) {
+        const msg = (data && (data.error || data.message)) || r.statusText || ("HTTP " + r.status);
+        const err = new Error(msg);
+        err.status = r.status;
+        throw err;
+      }
+      return data;
+    });
+  }
+
+  function toast(msg, kind) {
+    const t = el("div", { class: "toast " + (kind || "") }, msg);
+    document.body.appendChild(t);
+    setTimeout(() => t.remove(), 3500);
+  }
+
+  // Live "human" duration that updates every second when called as a
+  // function via DOM. We render the durations server-side too (DurationHuman),
+  // but for running rows we want them to *tick*.
+  function humanizeMs(ms) {
+    if (!ms || ms < 0) return "0s";
+    const s = Math.floor(ms / 1000);
+    if (s < 1) return ms + "ms";
+    if (s < 60) return s + "s";
+    const m = Math.floor(s / 60);
+    const rs = s % 60;
+    if (m < 60) return m + "m" + rs + "s";
+    const h = Math.floor(m / 60);
+    const rm = m % 60;
+    if (h < 24) return h + "h" + rm + "m" + rs + "s";
+    const d = Math.floor(h / 24);
+    const rh = h % 24;
+    return d + "d" + rh + "h";
+  }
+
+  function statusBadge(status, isRunning) {
+    const span = el("span", { class: "badge " + status });
+    if (isRunning || status === "PENDING") {
+      span.appendChild(el("span", { class: "spinner" }));
+    }
+    span.appendChild(document.createTextNode(status));
+    return span;
+  }
+
+  // tickClocks updates any element with [data-started-at] to display the
+  // live duration since that timestamp, on a 1s tick. We intentionally use
+  // a single shared interval so the table doesn't blow up.
+  let tickIv = null;
+  function startTicking() {
+    if (tickIv) return;
+    tickIv = setInterval(() => {
+      const nodes = document.querySelectorAll("[data-started-at]");
+      const now = Date.now();
+      nodes.forEach((n) => {
+        const t = parseInt(n.getAttribute("data-started-at"), 10);
+        if (!t) return;
+        n.textContent = humanizeMs(now - t);
+      });
+    }, 1000);
+  }
+
+  // ---------------------------------------------------------------------
+  // Router
+  // ---------------------------------------------------------------------
+  function parseRoute() {
+    let h = (location.hash || "").replace(/^#\/?/, "");
+    const parts = h.split("/").filter(Boolean);
+    if (parts.length === 0 || parts[0] === "workflows") {
+      if (parts[1]) return { name: "workflow", id: decodeURIComponent(parts[1]) };
+      return { name: "workflows" };
+    }
+    if (parts[0] === "queues") return { name: "queues" };
+    if (parts[0] === "info")   return { name: "info" };
+    return { name: "workflows" };
+  }
+
+  function highlightTab(route) {
+    for (const id of ["tab-workflows", "tab-queues", "tab-info"]) {
+      document.getElementById(id).classList.remove("active");
+    }
+    if (route.name === "workflows" || route.name === "workflow") {
+      document.getElementById("tab-workflows").classList.add("active");
+    } else if (route.name === "queues") {
+      document.getElementById("tab-queues").classList.add("active");
+    } else if (route.name === "info") {
+      document.getElementById("tab-info").classList.add("active");
+    }
+  }
+
+  function render() {
+    const route = parseRoute();
+    currentRoute = route;
+    highlightTab(route);
+
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    const view = document.getElementById("view");
+
+    if (route.name === "workflows") return renderWorkflowsList(view);
+    if (route.name === "workflow")  return renderWorkflowDetail(view, route.id);
+    if (route.name === "queues")    return renderQueues(view);
+    if (route.name === "info")      return renderInfo(view);
+  }
+
+  // ---------------------------------------------------------------------
+  // Top bar / health refresh
+  // ---------------------------------------------------------------------
+  let infoCache = null;
+  async function refreshInfo() {
+    try {
+      const info = await api("/info");
+      infoCache = info;
+      document.getElementById("brand-name").textContent = info.app_name || "ORC Admin";
+      document.getElementById("executor-pill").textContent = "executor: " + (info.executor_id || "—");
+      document.getElementById("health-dot").classList.remove("bad");
+      return info;
+    } catch (e) {
+      document.getElementById("health-dot").classList.add("bad");
+      throw e;
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Workflows list
+  // ---------------------------------------------------------------------
+  const STATUSES = [
+    "PENDING", "ENQUEUED", "DELAYED",
+    "SUCCESS", "ERROR", "CANCELLED",
+    "MAX_RECOVERY_ATTEMPTS_EXCEEDED",
+  ];
+
+  const PAGE_SIZE_OPTIONS = [25, 50, 100, 200, 500];
+
+  // Filter UI state lives in the URL so reloads / back-forward keep it.
+  // `page` is 1-based and is preserved across refresh; any change to the
+  // filter shape (status / name / queue / limit) resets it back to 1.
+  function listFilters() {
+    const u = new URL(location.href);
+    const rawLimit = parseInt(u.searchParams.get("limit") || "100", 10);
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 100;
+    const rawPage = parseInt(u.searchParams.get("page") || "1", 10);
+    const page = Number.isFinite(rawPage) && rawPage > 0 ? rawPage : 1;
+    return {
+      status: u.searchParams.getAll("status"),
+      name:   u.searchParams.get("name") || "",
+      queue:  u.searchParams.get("queue") || "",
+      limit:  String(limit),
+      page,
+    };
+  }
+  function setListFilter(name, value, multi) {
+    const u = new URL(location.href);
+    if (multi) {
+      u.searchParams.delete(name);
+      for (const v of value) u.searchParams.append(name, v);
+    } else {
+      if (value) u.searchParams.set(name, value);
+      else u.searchParams.delete(name);
+    }
+    // Any filter change drops us back to page 1.
+    if (name !== "page") u.searchParams.delete("page");
+    history.replaceState(null, "", u.toString());
+  }
+  function setListPage(p) {
+    const u = new URL(location.href);
+    if (!p || p <= 1) u.searchParams.delete("page");
+    else u.searchParams.set("page", String(p));
+    history.replaceState(null, "", u.toString());
+  }
+
+  function buildListQuery(f) {
+    const p = new URLSearchParams();
+    for (const s of f.status) p.append("status", s);
+    if (f.name)  p.set("name",  f.name);
+    if (f.queue) p.set("queue", f.queue);
+    p.set("limit", f.limit || "100");
+    p.set("page",  String(f.page || 1));
+    p.set("desc", "1");
+    p.set("load_io", "0");
+    return p.toString();
+  }
+
+  async function renderWorkflowsList(view) {
+    view.innerHTML = "";
+    const filters = listFilters();
+
+    // Stats panel
+    const stats = el("div", { class: "panel" }, [
+      el("h2", null, "Status"),
+      el("div", { id: "stats-row", class: "stats" }, el("div", { class: "muted" }, "Loading…")),
+    ]);
+    view.appendChild(stats);
+
+    // Filters
+    const queueOptions = el("select", { id: "f-queue" }, [el("option", { value: "" }, "any queue")]);
+    const statusBox = el("div", { id: "f-status", style: { display: "flex", gap: "8px", flexWrap: "wrap" } });
+    for (const s of STATUSES) {
+      const id = "fs-" + s;
+      const cb = el("input", {
+        type: "checkbox", id, value: s,
+        checked: filters.status.includes(s),
+        onchange: () => {
+          const all = Array.from(document.querySelectorAll("#f-status input:checked")).map((x) => x.value);
+          setListFilter("status", all, true);
+          refresh();
+        },
+      });
+      const lab = el("label", { for: id, style: { color: "var(--muted)", fontSize: "12px" } }, [
+        cb, document.createTextNode(" "), s,
+      ]);
+      statusBox.appendChild(lab);
+    }
+
+    const nameInput = el("input", {
+      id: "f-name", placeholder: "name contains…", value: filters.name,
+      oninput: debounce(() => {
+        setListFilter("name", document.getElementById("f-name").value);
+        refresh();
+      }, 250),
+    });
+
+    const limitSelect = el("select", {
+      id: "f-limit",
+      onchange: () => {
+        setListFilter("limit", document.getElementById("f-limit").value);
+        refresh();
+      },
+    });
+    for (const n of PAGE_SIZE_OPTIONS) {
+      const o = el("option", { value: String(n) }, String(n) + " / page");
+      if (String(n) === filters.limit) o.selected = true;
+      limitSelect.appendChild(o);
+    }
+    // If the URL carries a non-standard limit (e.g. carried over from
+    // an older link), surface it in the dropdown so the user sees what's
+    // actually being requested.
+    if (!PAGE_SIZE_OPTIONS.map(String).includes(filters.limit)) {
+      const o = el("option", { value: filters.limit, selected: true }, filters.limit + " / page");
+      limitSelect.appendChild(o);
+    }
+
+    const filterPanel = el("div", { class: "panel" }, [
+      el("div", { class: "toolbar" }, [
+        el("strong", null, "Filters"),
+        nameInput,
+        queueOptions,
+        limitSelect,
+        el("button", { onclick: refresh }, "Refresh"),
+        el("span", { class: "spacer", style: { flex: "1" } }),
+        el("span", { class: "muted mono", id: "list-count" }, ""),
+      ]),
+      statusBox,
+    ]);
+    view.appendChild(filterPanel);
+
+    // Table
+    const tableWrap = el("div", { class: "panel", style: { padding: "0", overflow: "auto" } });
+    tableWrap.innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Workflow ID</th>
+          <th>Name</th>
+          <th>Status</th>
+          <th>Queue</th>
+          <th class="nowrap">Attempts</th>
+          <th class="nowrap" title="Wall-clock time the workflow ran. Frozen once the workflow reaches a terminal state.">Duration</th>
+          <th class="nowrap" title="How long ago the workflow was created.">Created</th>
+          <th>Updated</th>
+        </tr></thead>
+        <tbody id="list-body"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+      </table>
+    `;
+    view.appendChild(tableWrap);
+
+    // Pagination panel
+    const paginationPanel = el("div", {
+      class: "panel",
+      id: "pagination-panel",
+      style: { display: "none" },
+    });
+    view.appendChild(paginationPanel);
+
+    queueOptions.addEventListener("change", () => {
+      setListFilter("queue", queueOptions.value);
+      refresh();
+    });
+
+    async function refresh() {
+      if (currentRoute !== route) return;
+      const f = listFilters();
+      try {
+        const [info, list] = await Promise.all([
+          refreshInfo(),
+          api("/workflows?" + buildListQuery(f)),
+        ]);
+        renderStats(info);
+        // Populate queue dropdown
+        const qNames = (info.queues || []).map((q) => q.name);
+        const cur = queueOptions.value;
+        queueOptions.innerHTML = "";
+        queueOptions.appendChild(el("option", { value: "" }, "any queue"));
+        for (const n of qNames) {
+          const o = el("option", { value: n }, n);
+          if (n === f.queue) o.selected = true;
+          queueOptions.appendChild(o);
+        }
+        if (cur && !qNames.includes(cur)) queueOptions.value = "";
+
+        renderListBody(list.items || []);
+        renderPagination(list, f, refresh);
+      } catch (e) {
+        document.getElementById("list-body").innerHTML =
+          `<tr><td colspan="8" class="empty" style="color:var(--err)">${escapeHTML(e.message)}</td></tr>`;
+      }
+    }
+
+    const route = currentRoute;
+    await refresh();
+    if (auto.checked) pollTimer = setInterval(refresh, POLL_MS);
+    startTicking();
+  }
+
+  // renderPagination updates the toolbar count text and the pagination
+  // panel below the table. The backend always returns total/page/page_size,
+  // so we have everything we need to compute "showing X–Y of Z".
+  function renderPagination(list, f, refreshFn) {
+    const total    = list.total || 0;
+    const pageSize = list.page_size || parseInt(f.limit, 10) || 100;
+    const page     = list.page || f.page || 1;
+    const items    = list.items || [];
+    const lastPage = pageSize > 0 ? Math.max(1, Math.ceil(total / pageSize)) : 1;
+    const start    = items.length ? ((page - 1) * pageSize) + 1 : 0;
+    const end      = items.length ? start + items.length - 1 : 0;
+
+    const countEl = document.getElementById("list-count");
+    if (countEl) {
+      countEl.textContent = total === 0
+        ? "0 results"
+        : `showing ${start}–${end} of ${total}`;
+    }
+
+    // If the requested page is past the end (e.g. a row was deleted while we
+    // were sitting on the last page, or the URL came in with page=99) jump
+    // back to the last valid page and re-fetch.
+    if (total > 0 && page > lastPage) {
+      setListPage(lastPage);
+      refreshFn();
+      return;
+    }
+
+    const panel = document.getElementById("pagination-panel");
+    if (!panel) return;
+
+    // Hide the panel entirely when there's nothing to paginate through.
+    if (total <= pageSize) {
+      panel.style.display = "none";
+      panel.innerHTML = "";
+      return;
+    }
+    panel.style.display = "";
+    panel.innerHTML = "";
+
+    const goto = (p) => {
+      const next = Math.min(Math.max(1, p), lastPage);
+      if (next === page) return;
+      setListPage(next);
+      // Smooth-scroll back up so the user sees the new top of the table.
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      refreshFn();
+    };
+
+    const bar = el("div", { class: "toolbar", style: { margin: "0", justifyContent: "space-between" } });
+
+    const left = el("div", { class: "muted mono", style: { fontSize: "12px" } },
+      `Page ${page} of ${lastPage} · ${total} total · ${pageSize} per page`);
+
+    const right = el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } });
+    const first = el("button", { disabled: page <= 1, onclick: () => goto(1) }, "« First");
+    const prev  = el("button", { disabled: page <= 1, onclick: () => goto(page - 1) }, "‹ Prev");
+    const next  = el("button", { disabled: page >= lastPage, onclick: () => goto(page + 1) }, "Next ›");
+    const last  = el("button", { disabled: page >= lastPage, onclick: () => goto(lastPage) }, "Last »");
+
+    const jumpInput = el("input", {
+      type: "number", min: "1", max: String(lastPage), value: String(page),
+      style: { width: "70px" },
+      onkeydown: (e) => { if (e.key === "Enter") jump(); },
+    });
+    const jumpBtn = el("button", { onclick: () => jump() }, "Go");
+    function jump() {
+      const v = parseInt(jumpInput.value, 10);
+      if (!Number.isFinite(v) || v < 1) return;
+      goto(v);
+    }
+    const jumpWrap = el("div", { style: { display: "flex", gap: "4px", alignItems: "center", marginLeft: "8px" } }, [
+      el("span", { class: "muted", style: { fontSize: "12px" } }, "Go to:"),
+      jumpInput, jumpBtn,
+    ]);
+
+    right.append(first, prev, next, last, jumpWrap);
+    bar.append(left, right);
+    panel.appendChild(bar);
+  }
+
+  function renderStats(info) {
+    const row = document.getElementById("stats-row");
+    if (!row) return;
+    const counts = info.status_counts || {};
+    row.innerHTML = "";
+    for (const s of STATUSES) {
+      const v = counts[s] || 0;
+      const card = el("div", { class: "stat", title: s }, [
+        el("div", { class: "label" }, s.replaceAll("_", " ")),
+        el("div", { class: "value" }, String(v)),
+      ]);
+      card.style.cursor = "pointer";
+      card.addEventListener("click", () => {
+        setListFilter("status", [s], true);
+        // refresh checkboxes
+        document.querySelectorAll("#f-status input").forEach((cb) => { cb.checked = (cb.value === s); });
+        // trigger render via hash (no change) — manually call refresh via re-render
+        render();
+      });
+      row.appendChild(card);
+    }
+  }
+
+  function renderListBody(items) {
+    const body = document.getElementById("list-body");
+    if (!items.length) {
+      body.innerHTML = `<tr><td colspan="8" class="empty">No workflows match the current filters.</td></tr>`;
+      return;
+    }
+    body.innerHTML = "";
+    for (const w of items) {
+      const tr = el("tr", { class: "row", onclick: () => goto("/workflows/" + encodeURIComponent(w.workflow_id)) });
+
+      const idCell = el("td", { class: "mono" }, w.workflow_id);
+      const nameCell = el("td", null, w.name || el("span", { class: "muted" }, "—"));
+      const statusCell = el("td", null, statusBadge(w.status, w.is_running));
+      const queueCell = el("td", { class: "mono muted" }, w.queue_name || "—");
+      const attemptsCell = el("td", { class: "nowrap" }, attemptsCellContent(w));
+
+      const durCell = el("td", { class: "nowrap mono" });
+      if (w.is_running && w.started_at) {
+        const started = Date.parse(w.started_at);
+        durCell.setAttribute("data-started-at", String(started));
+        durCell.textContent = humanizeMs(Date.now() - started);
+      } else {
+        durCell.textContent = w.duration_human || "—";
+      }
+
+      const ageCell = el("td", {
+        class: "nowrap mono muted",
+        title: w.created_at ? new Date(w.created_at).toLocaleString() : "",
+      }, w.age_human ? (w.age_human + " ago") : "—");
+      const updCell = el("td", { class: "nowrap muted mono" }, formatTime(w.updated_at));
+
+      tr.append(idCell, nameCell, statusCell, queueCell, attemptsCell, durCell, ageCell, updCell);
+      body.appendChild(tr);
+    }
+  }
+
+  function attemptsCellContent(w) {
+    const a = w.attempts || 0;
+    if (a <= 1 && !w.error) return el("span", { class: "muted mono" }, String(a));
+    const span = el("span", { class: "mono", title: w.error || "" }, String(a));
+    if (a > 1 || w.error) {
+      span.style.color = "var(--err)";
+      span.appendChild(document.createTextNode(" "));
+      span.appendChild(el("span", { class: "muted", style: { fontSize: "11px" } }, "errs"));
+    }
+    return span;
+  }
+
+  function formatTime(iso) {
+    if (!iso) return "—";
+    const t = new Date(iso);
+    if (isNaN(t.getTime())) return "—";
+    return t.toLocaleString();
+  }
+
+  function debounce(fn, ms) {
+    let t = null;
+    return function (...args) {
+      clearTimeout(t);
+      t = setTimeout(() => fn.apply(this, args), ms);
+    };
+  }
+
+  // ---------------------------------------------------------------------
+  // Workflow detail
+  // ---------------------------------------------------------------------
+  async function renderWorkflowDetail(view, id) {
+    view.innerHTML = "";
+
+    const back = el("div", { style: { marginBottom: "10px" } }, [
+      el("a", { href: "#/workflows" }, "← back to workflows"),
+    ]);
+    view.appendChild(back);
+
+    const summary = el("div", { class: "panel", id: "wf-summary" }, el("div", { class: "muted" }, "Loading…"));
+    view.appendChild(summary);
+
+    const grid = el("div", { class: "grid-2" });
+    const stepsPanel = el("div", { class: "panel" }, [
+      el("h2", null, "Steps"),
+      el("div", { id: "wf-steps" }, el("div", { class: "muted" }, "Loading…")),
+    ]);
+    const childrenPanel = el("div", { class: "panel" }, [
+      el("h2", null, "Children"),
+      el("div", { id: "wf-children" }, el("div", { class: "muted" }, "Loading…")),
+    ]);
+    grid.append(stepsPanel, childrenPanel);
+    view.appendChild(grid);
+
+    const ioPanel = el("div", { class: "panel" }, [
+      el("h2", null, "Input / Output"),
+      el("div", { id: "wf-io" }),
+    ]);
+    view.appendChild(ioPanel);
+
+    const treePanel = el("div", { class: "panel" }, [
+      el("h2", null, "Descendant Tree"),
+      el("div", { id: "wf-tree" }, el("div", { class: "muted" }, "Loading…")),
+    ]);
+    view.appendChild(treePanel);
+
+    async function refresh() {
+      if (currentRoute.name !== "workflow" || currentRoute.id !== id) return;
+      try {
+        await refreshInfo();
+        const detail = await api("/workflows/" + encodeURIComponent(id));
+        renderSummary(detail, id);
+        renderSteps(detail.steps || []);
+        renderChildren(detail.children || []);
+        renderIO(detail);
+      } catch (e) {
+        summary.innerHTML = `<div class="empty" style="color:var(--err)">${escapeHTML(e.message)}</div>`;
+      }
+      try {
+        const tree = await api("/workflows/" + encodeURIComponent(id) + "/tree?depth=10");
+        renderTree(tree, id);
+      } catch (e) {
+        document.getElementById("wf-tree").innerHTML =
+          `<div class="muted">tree unavailable: ${escapeHTML(e.message)}</div>`;
+      }
+    }
+
+    await refresh();
+    if (auto.checked) pollTimer = setInterval(refresh, POLL_MS);
+    startTicking();
+  }
+
+  function renderSummary(w, id) {
+    const root = document.getElementById("wf-summary");
+    if (!root) return;
+    root.innerHTML = "";
+
+    const header = el("div", { style: { display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap", marginBottom: "10px" } }, [
+      el("h3", { style: { margin: "0", flex: "1" } }, [
+        el("span", { class: "mono" }, w.workflow_id),
+      ]),
+      statusBadge(w.status, w.is_running),
+    ]);
+    root.appendChild(header);
+
+    // Action buttons
+    const actions = el("div", { class: "actions", style: { marginBottom: "12px" } });
+
+    const isTerminal = !!w.is_terminal;
+    const cancelBtn = el("button", {
+      class: "warn",
+      disabled: isTerminal,
+      onclick: () => doAction("cancel",
+        `/workflows/${encodeURIComponent(id)}/cancel`, "POST", "Workflow cancelled."),
+    }, "Stop / Cancel");
+    const resumeBtn = el("button", {
+      class: "ok",
+      disabled: !isTerminal,
+      onclick: () => doAction("resume",
+        `/workflows/${encodeURIComponent(id)}/resume`, "POST", "Workflow resumed."),
+    }, "Restart / Resume");
+    const forkBtn = el("button", {
+      onclick: () => {
+        const v = prompt("Fork from step (>=0):", "0");
+        if (v == null) return;
+        const n = parseInt(v, 10);
+        if (isNaN(n) || n < 0) { toast("invalid step number", "err"); return; }
+        const newId = prompt("Optional new workflow id (blank for auto):", "") || "";
+        api(`/workflows/${encodeURIComponent(id)}/fork`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ start_from_step: n, new_workflow_id: newId }),
+        }).then((r) => {
+          toast("Forked → " + r.new_workflow_id, "ok");
+          if (r.new_workflow_id) goto("/workflows/" + encodeURIComponent(r.new_workflow_id));
+        }).catch((e) => toast(e.message, "err"));
+      },
+    }, "Fork…");
+    const deleteBtn = el("button", {
+      class: "danger",
+      onclick: () => {
+        if (!confirm("Delete workflow " + id + " and all dependent rows?")) return;
+        api(`/workflows/${encodeURIComponent(id)}`, { method: "DELETE" })
+          .then(() => { toast("Deleted.", "ok"); goto("/workflows"); })
+          .catch((e) => toast(e.message, "err"));
+      },
+    }, "Delete");
+
+    actions.append(cancelBtn, resumeBtn, forkBtn, deleteBtn);
+    root.appendChild(actions);
+
+    // Key/value details
+    const dl = el("dl", { class: "kv" });
+    function add(label, value) {
+      if (value == null || value === "" || value === 0) return;
+      dl.appendChild(el("dt", null, label));
+      const ddVal = (value instanceof Node) ? value
+        : (typeof value === "string" ? document.createTextNode(value)
+        : document.createTextNode(String(value)));
+      dl.appendChild(el("dd", null, [ddVal]));
+    }
+    function addAlways(label, value) {
+      dl.appendChild(el("dt", null, label));
+      const ddVal = (value instanceof Node) ? value : document.createTextNode(value || "—");
+      dl.appendChild(el("dd", null, [ddVal]));
+    }
+
+    addAlways("Name", w.name || "—");
+    add("Queue", w.queue_name);
+    add("Executor", el("span", { class: "mono" }, w.executor_id));
+    add("App version", w.application_version);
+    add("App ID", w.application_id);
+    add("Dedup ID", w.deduplication_id);
+    add("Priority", w.priority);
+    addAlways("Attempts", String(w.attempts || 0));
+
+    if (w.is_running && w.started_at) {
+      const started = Date.parse(w.started_at);
+      const live = el("span", { class: "mono" });
+      live.setAttribute("data-started-at", String(started));
+      live.textContent = humanizeMs(Date.now() - started);
+      live.appendChild(document.createTextNode(" "));
+      live.appendChild(el("span", { class: "spinner" }));
+      addAlways("Running for", live);
+    } else if (w.duration_human) {
+      addAlways("Duration", w.duration_human);
+    }
+
+    if (w.parent_workflow_id) {
+      addAlways("Parent",
+        el("a", { href: "#/workflows/" + encodeURIComponent(w.parent_workflow_id), class: "mono" },
+          w.parent_workflow_id));
+    }
+    if (w.forked_from) addAlways("Forked from",
+      el("a", { href: "#/workflows/" + encodeURIComponent(w.forked_from), class: "mono" }, w.forked_from));
+    if (w.cron_schedule)  addAlways("Cron", w.cron_schedule);
+    if (w.timeout_ms)     addAlways("Timeout", humanizeMs(w.timeout_ms));
+    if (w.deadline)       addAlways("Deadline", formatTime(w.deadline));
+    if (w.delay_until)    addAlways("Delay until", formatTime(w.delay_until));
+    addAlways("Created",  formatTime(w.created_at));
+    if (w.started_at)     addAlways("Started", formatTime(w.started_at));
+    addAlways("Updated",  formatTime(w.updated_at));
+
+    root.appendChild(dl);
+
+    if (w.error) {
+      const errBox = el("div", { style: { marginTop: "12px" } }, [
+        el("h2", null, "Error"),
+        el("pre", { class: "code error" }, w.error),
+      ]);
+      root.appendChild(errBox);
+    }
+  }
+
+  function renderSteps(steps) {
+    const root = document.getElementById("wf-steps");
+    if (!steps.length) {
+      root.innerHTML = `<div class="empty">No checkpointed steps yet.</div>`;
+      return;
+    }
+    root.innerHTML = "";
+    const tbl = el("table");
+    tbl.innerHTML = `
+      <thead><tr>
+        <th>#</th><th>Name</th><th>Status</th><th>Result</th><th class="nowrap">Created</th>
+      </tr></thead>
+      <tbody></tbody>`;
+    const tb = tbl.querySelector("tbody");
+    for (const s of steps) {
+      const status = s.error ? "ERROR" : "SUCCESS";
+      const tr = el("tr");
+      tr.appendChild(el("td", { class: "mono" }, String(s.step_id)));
+      const nameTd = el("td", null, s.step_name || "—");
+      if (s.child_workflow_id) {
+        nameTd.appendChild(document.createTextNode(" "));
+        nameTd.appendChild(el("a", {
+          class: "mono",
+          href: "#/workflows/" + encodeURIComponent(s.child_workflow_id),
+          title: "child workflow",
+        }, "↪ " + s.child_workflow_id));
+      }
+      tr.appendChild(nameTd);
+      tr.appendChild(el("td", null, statusBadge(status, false)));
+      const resultTd = el("td");
+      if (s.error) {
+        resultTd.appendChild(el("pre", { class: "code error", style: { margin: "0", maxHeight: "120px" } }, s.error));
+      } else if (s.output !== undefined && s.output !== null) {
+        resultTd.appendChild(el("pre", { class: "code", style: { margin: "0", maxHeight: "120px" } }, prettyJSON(s.output)));
+      } else {
+        resultTd.appendChild(el("span", { class: "muted" }, "—"));
+      }
+      tr.appendChild(resultTd);
+      tr.appendChild(el("td", { class: "nowrap muted mono" }, formatTime(s.created_at)));
+      tb.appendChild(tr);
+    }
+    root.appendChild(tbl);
+  }
+
+  function renderChildren(children) {
+    const root = document.getElementById("wf-children");
+    if (!children.length) {
+      root.innerHTML = `<div class="empty">No child workflows.</div>`;
+      return;
+    }
+    root.innerHTML = "";
+    const tbl = el("table");
+    tbl.innerHTML = `
+      <thead><tr>
+        <th>Workflow ID</th><th>Name</th><th>Status</th><th class="nowrap">Duration</th>
+      </tr></thead><tbody></tbody>`;
+    const tb = tbl.querySelector("tbody");
+    for (const w of children) {
+      const tr = el("tr", { class: "row", onclick: () => goto("/workflows/" + encodeURIComponent(w.workflow_id)) });
+      tr.appendChild(el("td", { class: "mono" }, w.workflow_id));
+      tr.appendChild(el("td", null, w.name || "—"));
+      tr.appendChild(el("td", null, statusBadge(w.status, w.is_running)));
+      const durTd = el("td", { class: "nowrap mono" });
+      if (w.is_running && w.started_at) {
+        const started = Date.parse(w.started_at);
+        durTd.setAttribute("data-started-at", String(started));
+        durTd.textContent = humanizeMs(Date.now() - started);
+      } else {
+        durTd.textContent = w.duration_human || "—";
+      }
+      tr.appendChild(durTd);
+      tb.appendChild(tr);
+    }
+    root.appendChild(tbl);
+  }
+
+  function renderIO(w) {
+    const root = document.getElementById("wf-io");
+    root.innerHTML = "";
+    const grid = el("div", { class: "grid-2" });
+    grid.appendChild(el("div", null, [
+      el("h3", null, "Input"),
+      w.input !== undefined && w.input !== null
+        ? el("pre", { class: "code" }, prettyJSON(w.input))
+        : el("div", { class: "muted" }, "—"),
+    ]));
+    grid.appendChild(el("div", null, [
+      el("h3", null, "Output"),
+      w.output !== undefined && w.output !== null
+        ? el("pre", { class: "code" }, prettyJSON(w.output))
+        : el("div", { class: "muted" }, "—"),
+    ]));
+    root.appendChild(grid);
+  }
+
+  function renderTree(node, rootId) {
+    const root = document.getElementById("wf-tree");
+    if (!root) return;
+    root.innerHTML = "";
+    const wrap = el("div", { class: "tree" });
+    wrap.appendChild(treeNode(node, rootId));
+    root.appendChild(wrap);
+  }
+  function treeNode(node, rootId) {
+    const li = el("div");
+    const isRoot = node.workflow_id === rootId;
+    const link = isRoot
+      ? el("span", { class: "mono" }, node.workflow_id)
+      : el("a", { class: "mono", href: "#/workflows/" + encodeURIComponent(node.workflow_id) }, node.workflow_id);
+    li.appendChild(link);
+    li.appendChild(document.createTextNode(" "));
+    li.appendChild(statusBadge(node.status, node.is_running));
+    if (node.name) {
+      li.appendChild(document.createTextNode(" "));
+      li.appendChild(el("span", { class: "muted" }, node.name));
+    }
+    if (node.children && node.children.length) {
+      const ul = el("ul");
+      for (const c of node.children) {
+        const child = el("li");
+        child.appendChild(treeNode(c, rootId));
+        ul.appendChild(child);
+      }
+      li.appendChild(ul);
+    }
+    return li;
+  }
+
+  function prettyJSON(v) {
+    try { return JSON.stringify(v, null, 2); }
+    catch { return String(v); }
+  }
+
+  function doAction(name, path, method, okMsg) {
+    api(path, { method }).then(() => {
+      toast(okMsg || (name + " ok"), "ok");
+      render();
+    }).catch((e) => toast(e.message, "err"));
+  }
+
+  // ---------------------------------------------------------------------
+  // Queues
+  // ---------------------------------------------------------------------
+  async function renderQueues(view) {
+    view.innerHTML = "";
+    const wrap = el("div", { class: "panel" }, [
+      el("h2", null, "Queues"),
+      el("div", { id: "queues-body" }, el("div", { class: "muted" }, "Loading…")),
+    ]);
+    view.appendChild(wrap);
+
+    async function refresh() {
+      if (currentRoute.name !== "queues") return;
+      try {
+        await refreshInfo();
+        const queues = await api("/queues");
+        renderQueuesBody(queues || []);
+      } catch (e) {
+        document.getElementById("queues-body").innerHTML =
+          `<div class="empty" style="color:var(--err)">${escapeHTML(e.message)}</div>`;
+      }
+    }
+    await refresh();
+    if (auto.checked) pollTimer = setInterval(refresh, POLL_MS);
+  }
+  function renderQueuesBody(queues) {
+    const body = document.getElementById("queues-body");
+    if (!queues.length) {
+      body.innerHTML = `<div class="empty">No queues registered.</div>`;
+      return;
+    }
+    body.innerHTML = "";
+    const tbl = el("table");
+    tbl.innerHTML = `
+      <thead><tr>
+        <th>Name</th><th class="nowrap">Worker concurrency</th><th class="nowrap">Global concurrency</th>
+        <th class="nowrap">Priority</th><th class="nowrap">Rate limit</th>
+        <th class="nowrap">Pending</th><th class="nowrap">Running</th>
+      </tr></thead><tbody></tbody>`;
+    const tb = tbl.querySelector("tbody");
+    for (const q of queues) {
+      const tr = el("tr", { class: "row", onclick: () => {
+        const u = new URL(location.href);
+        u.searchParams.set("queue", q.name);
+        // Reset pagination — it would be confusing to land on page 5 of a
+        // freshly-applied queue filter.
+        u.searchParams.delete("page");
+        history.replaceState(null, "", u.toString());
+        goto("/workflows");
+      }});
+      tr.appendChild(el("td", { class: "mono" }, q.name));
+      tr.appendChild(el("td", { class: "nowrap mono" }, String(q.worker_concurrency || "—")));
+      tr.appendChild(el("td", { class: "nowrap mono" }, String(q.global_concurrency || "—")));
+      tr.appendChild(el("td", { class: "nowrap mono" }, q.with_priority ? "yes" : "no"));
+      const rl = q.rate_limiter
+        ? `${q.rate_limiter.Limit}/${Math.round((q.rate_limiter.Period||0)/1e6)}ms`
+        : "—";
+      tr.appendChild(el("td", { class: "nowrap mono" }, rl));
+      tr.appendChild(el("td", { class: "nowrap mono" }, String(q.pending || 0)));
+      tr.appendChild(el("td", { class: "nowrap mono" }, String(q.running || 0)));
+      tb.appendChild(tr);
+    }
+    body.appendChild(tbl);
+  }
+
+  // ---------------------------------------------------------------------
+  // Info
+  // ---------------------------------------------------------------------
+  async function renderInfo(view) {
+    view.innerHTML = "";
+    const root = el("div", { class: "panel" }, [
+      el("h2", null, "Executor"),
+      el("div", { id: "info-body" }, el("div", { class: "muted" }, "Loading…")),
+    ]);
+    view.appendChild(root);
+
+    const regPanel = el("div", { class: "panel" }, [
+      el("h2", null, "Registered Workflows"),
+      el("div", { id: "info-registered" }),
+    ]);
+    view.appendChild(regPanel);
+
+    async function refresh() {
+      if (currentRoute.name !== "info") return;
+      try {
+        const info = await refreshInfo();
+        const dl = el("dl", { class: "kv" });
+        function row(k, v) {
+          dl.appendChild(el("dt", null, k));
+          dl.appendChild(el("dd", null, [v instanceof Node ? v : document.createTextNode(String(v ?? "—"))]));
+        }
+        row("App name",        info.app_name);
+        row("App version",     info.application_version);
+        row("Executor ID",     el("span", { class: "mono" }, info.executor_id || "—"));
+        row("Database",        el("span", { class: "mono" }, info.database_path || "—"));
+        row("Registered",      String(info.registered_count || 0));
+        row("Server time",     formatTime(info.now));
+        const body = document.getElementById("info-body");
+        body.innerHTML = ""; body.appendChild(dl);
+
+        const r = document.getElementById("info-registered");
+        r.innerHTML = "";
+        const wrap = el("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap" } });
+        for (const n of (info.registered_workflows || [])) {
+          wrap.appendChild(el("span", { class: "badge", style: { borderColor: "var(--border)", color: "var(--text)" } }, n));
+        }
+        r.appendChild(wrap.children.length ? wrap : el("div", { class: "muted" }, "none"));
+      } catch (e) {
+        document.getElementById("info-body").innerHTML =
+          `<div class="empty" style="color:var(--err)">${escapeHTML(e.message)}</div>`;
+      }
+    }
+    await refresh();
+    if (auto.checked) pollTimer = setInterval(refresh, POLL_MS);
+  }
+
+  // ---------------------------------------------------------------------
+  // Boot
+  // ---------------------------------------------------------------------
+  function goto(path) { location.hash = "#" + path; }
+
+  window.addEventListener("hashchange", render);
+  auto.addEventListener("change", () => render());
+  if (!location.hash) location.hash = "#/workflows";
+  render();
+})();
+</script>
+</body>
+</html>

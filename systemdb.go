@@ -18,6 +18,7 @@ type systemDatabase interface {
 	insertWorkflow(ctx context.Context, in insertWorkflowInput) (insertWorkflowResult, error)
 	getWorkflowStatus(ctx context.Context, workflowID string, loadIO bool) (*WorkflowStatus, error)
 	listWorkflows(ctx context.Context, in listWorkflowsInput) ([]WorkflowStatus, error)
+	countWorkflows(ctx context.Context, in listWorkflowsInput) (int, error)
 	updateWorkflowStatus(ctx context.Context, in updateWorkflowStatusInput) error
 	cancelWorkflow(ctx context.Context, workflowID string) error
 	resumeWorkflow(ctx context.Context, workflowID string) error

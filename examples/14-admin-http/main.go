@@ -5,6 +5,10 @@
 // requests for live monitoring, cancellation, resume, fork and tree
 // inspection.
 //
+// In addition to the JSON API, this example also mounts the bundled
+// HTML/JS dashboard from package web at /ui/. Open
+// http://localhost:8080/ in a browser and you'll be redirected to the UI.
+//
 // The admin handler purposely has NO authentication or authorization built
 // in — protect it at a higher layer (reverse proxy, middleware, internal-
 // only listener) before exposing it externally.
@@ -13,6 +17,7 @@
 //
 // While it's running:
 //
+//	open http://localhost:8080/ui/                              # dashboard
 //	curl http://localhost:8080/admin/                           # discovery
 //	curl http://localhost:8080/admin/health
 //	curl http://localhost:8080/admin/info
@@ -44,6 +49,7 @@ import (
 	"time"
 
 	"ella.to/orc"
+	"ella.to/orc/web"
 )
 
 // longJob is a workflow that takes a few seconds to complete and exposes
@@ -140,18 +146,16 @@ func main() {
 		orc.WithAdminPrettyJSON(),
 	)))
 
+	// Mount the bundled HTML/JS dashboard under /ui. The UI talks back
+	// to the admin handler at "/admin" (passed in below).
+	mux.Handle("/ui/", http.StripPrefix("/ui", web.Handler("/admin")))
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `orc admin demo
-
-Try:
-
-  curl http://localhost:8080/admin/
-  curl http://localhost:8080/admin/info
-  curl http://localhost:8080/admin/workflows
-  curl http://localhost:8080/admin/workflows/job-1
-  curl http://localhost:8080/admin/workflows/parent-1/tree
-  curl -X POST http://localhost:8080/admin/workflows/job-1/cancel
-`)
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, "/ui/", http.StatusFound)
+			return
+		}
+		http.NotFound(w, r)
 	})
 
 	srv := &http.Server{
@@ -168,7 +172,8 @@ Try:
 	}()
 
 	log.Println("admin demo listening on http://localhost:8080  (Ctrl-C to stop)")
-	log.Println("see http://localhost:8080/admin/ for the route index")
+	log.Println("dashboard:  http://localhost:8080/ui/")
+	log.Println("admin api:  http://localhost:8080/admin/")
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
