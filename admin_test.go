@@ -428,6 +428,77 @@ func TestAdmin_DeleteSingleAndBulk(t *testing.T) {
 	}
 }
 
+func TestAdmin_GC(t *testing.T) {
+	c := newTestContext(t)
+	good := func(c *Context, _ string) (string, error) { return "ok", nil }
+	RegisterWorkflow[string, string](c, good, WithWorkflowName("gcgood"))
+	_ = Launch(c)
+
+	for i := 0; i < 4; i++ {
+		h, _ := RunWorkflow[string, string](c, good, "")
+		_, _ = h.GetResult()
+	}
+
+	srv := newAdminTestServer(t, c)
+
+	// Missing statuses -> 400.
+	resp, _ := srv.do("POST", "/workflows/gc", AdminGCRequest{
+		UpdatedBefore: time.Now().Add(time.Minute),
+	})
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for missing statuses, got %d", resp.StatusCode)
+	}
+
+	// Missing updated_before -> 400.
+	resp, _ = srv.do("POST", "/workflows/gc", AdminGCRequest{
+		Statuses: []WorkflowStatusType{WorkflowStatusSuccess},
+	})
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for missing updated_before, got %d", resp.StatusCode)
+	}
+
+	// Non-terminal status without override -> 400.
+	resp, _ = srv.do("POST", "/workflows/gc", AdminGCRequest{
+		Statuses:      []WorkflowStatusType{WorkflowStatusPending},
+		UpdatedBefore: time.Now().Add(time.Minute),
+	})
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for non-terminal status, got %d", resp.StatusCode)
+	}
+
+	// Cutoff in the past -> 0 deletions.
+	var none AdminGCResponse
+	srv.doJSON("POST", "/workflows/gc", AdminGCRequest{
+		Statuses:      []WorkflowStatusType{WorkflowStatusSuccess},
+		UpdatedBefore: time.Now().Add(-time.Hour),
+	}, &none)
+	if none.Deleted != 0 {
+		t.Errorf("past cutoff: deleted=%d want 0", none.Deleted)
+	}
+
+	// Real GC. updated_at is set to "now" by the runtime when the
+	// workflow finalises, so a cutoff a minute in the future picks them
+	// all up. Lowercase status name is normalised to uppercase by the
+	// handler.
+	var ok AdminGCResponse
+	srv.doJSON("POST", "/workflows/gc", AdminGCRequest{
+		Statuses:      []WorkflowStatusType{"success"},
+		UpdatedBefore: time.Now().Add(time.Minute),
+	}, &ok)
+	if ok.Deleted != 4 {
+		t.Errorf("gc: deleted=%d want 4 (errors=%v)", ok.Deleted, ok.Errors)
+	}
+	if ok.Failed != 0 || len(ok.Errors) != 0 {
+		t.Errorf("gc: unexpected failures: failed=%d errs=%v", ok.Failed, ok.Errors)
+	}
+
+	// Survivors: nothing should remain.
+	survivors, _ := ListWorkflows(c, WithListWorkflowStatus(WorkflowStatusSuccess))
+	if len(survivors) != 0 {
+		t.Errorf("survivors=%d want 0", len(survivors))
+	}
+}
+
 func TestAdmin_TreeAndChildren(t *testing.T) {
 	c := newTestContext(t)
 	leaf := func(c *Context, n int) (int, error) { return n * 2, nil }

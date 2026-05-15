@@ -36,7 +36,7 @@ in-flight workflows from their last checkpoint when it next launches.
 - **Durable sleep** — `Sleep` survives restarts.
 - **Cron scheduling** — `WithSchedule("* * * * * *")` registers a cron-driven workflow.
 - **Recovery** — interrupted workflows automatically resume on `Launch`.
-- **Management APIs** — `ListWorkflows`, `CancelWorkflow`, `ResumeWorkflow`, `ForkWorkflow`, `DeleteWorkflows`.
+- **Management APIs** — `ListWorkflows`, `CancelWorkflow`, `ResumeWorkflow`, `ForkWorkflow`, `DeleteWorkflows`, `GCWorkflows`.
 - **Admin HTTP handler** — `orc.AdminHandler(ctx)` returns a `http.Handler` you can mount under any prefix in your own `net/http` mux for live monitoring, cancel/resume/fork, parent/child tree inspection, and per-workflow durations.
 - **Bundled web dashboard** — `web.Handler("/admin")` from the `ella.to/orc/web` sub-package serves a single-file HTML/JS UI that talks to the admin handler — paginated workflow list with filters, live status counters, per-workflow detail with steps/children/tree, and stop / restart / fork / delete buttons. No build step, no external assets.
 - **Single binary** — only dependency at runtime is the SQLite file.
@@ -107,7 +107,7 @@ func main() {
 | **Sleep**          | `orc.Sleep`                                             | Durable timer. Wakeup time is checkpointed.                                          |
 | **Schedule**       | `orc.WithSchedule("* * * * * *")` at registration time  | Robfig cron, with seconds granularity.                                               |
 | **Recovery**       | Implicit at `Launch`                                    | Picks up `PENDING` workflows + `ENQUEUED` workflows assigned to this `ExecutorID`.   |
-| **Management**     | `orc.ListWorkflows`, `CancelWorkflow`, `ResumeWorkflow`, `ForkWorkflow`, `DeleteWorkflows`, `RetrieveWorkflow`, `GetWorkflowSteps` | Programmatic admin. |
+| **Management**     | `orc.ListWorkflows`, `CancelWorkflow`, `ResumeWorkflow`, `ForkWorkflow`, `DeleteWorkflows`, `GCWorkflows`, `RetrieveWorkflow`, `GetWorkflowSteps` | Programmatic admin. |
 | **Admin HTTP**     | `orc.AdminHandler(ctx)`                                 | A `net/http` handler that exposes all of the above as a JSON API.                    |
 | **Web dashboard**  | `ella.to/orc/web` → `web.Handler(apiBase)`              | Embedded single-file HTML/JS UI for the admin API. Mount alongside `AdminHandler`.   |
 
@@ -273,6 +273,14 @@ h, _ := orc.ForkWorkflow[string](ctx, orc.ForkWorkflowInput{
     StartFromStep:      2, // re-use step outputs 0..1, re-run from step 2
 })
 _ = orc.DeleteWorkflows(ctx, []string{"wf-123"})
+
+// Bulk GC. Permanently delete every SUCCESS workflow last updated more
+// than a week ago (and cascade to its steps / events / notifications).
+res, _ := orc.GCWorkflows(ctx, orc.GCWorkflowsInput{
+    Statuses:      []orc.WorkflowStatusType{orc.WorkflowStatusSuccess},
+    UpdatedBefore: time.Now().Add(-7 * 24 * time.Hour),
+})
+fmt.Printf("gc: deleted=%d failed=%d\n", res.Deleted, res.Failed)
 
 steps, _ := orc.GetWorkflowSteps(ctx, "wf-123")
 ```
@@ -676,6 +684,7 @@ All paths below are relative to wherever you mounted the handler. With the
 | `GET`    | `/queues`                         | Registered queues + per-queue pending and running counts.                                                |
 | `GET`    | `/workflows`                      | List workflows with filters (see params below).                                                          |
 | `POST`   | `/workflows/delete`               | Bulk delete. Body: `{"ids":["a","b"]}`.                                                                  |
+| `POST`   | `/workflows/gc`                   | Garbage-collect by status + cutoff. Body: `{"statuses":[...], "updated_before":"RFC3339", "allow_non_terminal":false}`. Returns `{"deleted":N, "failed":N, "errors":[...]}`. |
 | `GET`    | `/workflows/{id}`                 | Workflow detail: status, computed duration, all checkpointed steps, direct child workflows.              |
 | `DELETE` | `/workflows/{id}`                 | Hard-delete a single workflow and its dependent rows.                                                    |
 | `GET`    | `/workflows/{id}/steps`           | List the workflow's checkpointed steps.                                                                  |
@@ -771,6 +780,56 @@ Compute the last page as `ceil(total / page_size)`. Counting uses the same
 `WHERE` clause as the list query, so totals match exactly what an
 unpaginated request would return.
 
+### Garbage collection — `POST /workflows/gc`
+
+`GCWorkflows` (and the `POST /workflows/gc` endpoint that wraps it) is
+designed for bulk database hygiene: as the workflow table grows, range
+scans, status counts and the workflow list all get slower. A periodic GC
+keeps the table compact and the cascading deletes (`operation_outputs`,
+`notifications`, `workflow_events`) happen automatically via the schema's
+`ON DELETE CASCADE`.
+
+**Request body**
+
+```json
+{
+  "statuses":           ["SUCCESS", "ERROR"],
+  "updated_before":     "2026-04-01T00:00:00Z",
+  "allow_non_terminal": false
+}
+```
+
+| Field                | Type / format         | Notes                                                                 |
+| -------------------- | --------------------- | --------------------------------------------------------------------- |
+| `statuses`           | non-empty enum array  | Lowercase is normalised to uppercase. By default only terminal statuses (`SUCCESS`, `ERROR`, `CANCELLED`, `MAX_RECOVERY_ATTEMPTS_EXCEEDED`) are accepted; passing a non-terminal status without `allow_non_terminal` returns `400`. |
+| `updated_before`     | RFC3339 timestamp     | Required. Only rows whose `updated_at` is **strictly less than** this cutoff are deleted, so the cutoff is exclusive. |
+| `allow_non_terminal` | bool                  | Optional. Set to `true` to also GC `PENDING` / `ENQUEUED` / `DELAYED` rows — useful for pruning zombies but dangerous for live workflows. Default `false`. |
+
+**Response body**
+
+```json
+{
+  "deleted": 42,
+  "failed":  0,
+  "errors":  []
+}
+```
+
+| Field     | Meaning                                                                                       |
+| --------- | --------------------------------------------------------------------------------------------- |
+| `deleted` | Total number of `workflow_status` rows actually removed across all requested statuses.        |
+| `failed`  | Best-effort estimate of rows that matched the filter but couldn't be deleted (zero in the happy path; populated when a per-status DELETE returns an error). |
+| `errors`  | Per-status error messages, if any.                                                            |
+
+**Implementation notes**
+
+- Each status runs in its own DELETE statement, so a partial failure
+  (one status fails) does not block the others.
+- Counting and deletion share the same `WHERE` clause, so totals reported
+  in `failed` match exactly what the GC would have considered.
+- This endpoint is a thin wrapper over `orc.GCWorkflows` — see the
+  Management section above for the equivalent in-process API.
+
 ### Errors
 
 Any non-2xx response has a JSON body of the form:
@@ -825,6 +884,12 @@ curl -X POST -d '{"start_from_step":2}' \
 # bulk delete
 curl -X POST -d '{"ids":["job-1","job-2"]}' \
      http://localhost:8080/admin/workflows/delete
+
+# garbage collect: prune SUCCESS rows older than a week
+curl -X POST -H 'Content-Type: application/json' \
+     -d "{\"statuses\":[\"SUCCESS\"],\"updated_before\":\"$(date -u -v-7d '+%Y-%m-%dT%H:%M:%SZ')\"}" \
+     http://localhost:8080/admin/workflows/gc
+# -> {"deleted":42,"failed":0}
 ```
 
 A complete runnable example with seeded workflows lives in
@@ -882,6 +947,10 @@ Open <http://localhost:8080/ui/> in a browser.
     the last valid page if data shrinks underneath you.
   - Live-ticking "Duration" for `PENDING` rows; frozen "Duration" for
     terminal rows; relative "Created" timestamp.
+  - **Garbage collection panel** (collapsed by default) that wraps
+    `POST /workflows/gc`: pick statuses, pick a cutoff (with quick
+    presets for 1 hour / 1 day / 1 week / 1 month), confirm, and the
+    result panel shows how many rows were deleted vs failed.
 - **Workflow detail** — full metadata, action buttons (**Stop /
   Cancel**, **Restart / Resume**, **Fork…**, **Delete**), checkpointed
   steps with output/error, direct children (clickable), input/output

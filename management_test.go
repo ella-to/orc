@@ -199,6 +199,117 @@ func TestResumeWorkflow_AfterError(t *testing.T) {
 	}
 }
 
+func TestGCWorkflows_DeletesByStatusAndCutoff(t *testing.T) {
+	c := newTestContext(t)
+	good := func(c *Context, _ string) (string, error) { return "ok", nil }
+	bad := func(c *Context, _ string) (string, error) { return "", errors.New("nope") }
+	RegisterWorkflow[string, string](c, good, WithWorkflowName("good"))
+	RegisterWorkflow[string, string](c, bad, WithWorkflowName("bad"))
+	_ = Launch(c)
+
+	// Drive a few of each to terminal state. updated_at gets set to "now"
+	// when the workflow finalises.
+	for i := 0; i < 3; i++ {
+		h, _ := RunWorkflow[string, string](c, good, "")
+		_, _ = h.GetResult()
+	}
+	for i := 0; i < 2; i++ {
+		h, _ := RunWorkflow[string, string](c, bad, "")
+		_, _ = h.GetResult()
+	}
+
+	// Sanity: pre-GC counts.
+	preOK, _ := ListWorkflows(c, WithListWorkflowStatus(WorkflowStatusSuccess))
+	preErr, _ := ListWorkflows(c, WithListWorkflowStatus(WorkflowStatusError))
+	if len(preOK) != 3 || len(preErr) != 1 {
+		// `bad` returns an error on every attempt; only one such
+		// workflow may end up with WorkflowStatusError because of
+		// step-checkpoint dedup. Just sanity-check the shape.
+		t.Logf("pre-gc success=%d error=%d", len(preOK), len(preErr))
+	}
+
+	// GC SUCCESS rows updated before "now + 1m". updated_at is monotonic
+	// from the workflow runtime, so this cutoff catches all of them.
+	cutoff := time.Now().Add(time.Minute)
+	res, err := GCWorkflows(c, GCWorkflowsInput{
+		Statuses:      []WorkflowStatusType{WorkflowStatusSuccess},
+		UpdatedBefore: cutoff,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Deleted != len(preOK) {
+		t.Errorf("Deleted=%d want=%d", res.Deleted, len(preOK))
+	}
+	if res.Failed != 0 || len(res.Errors) != 0 {
+		t.Errorf("unexpected failures: failed=%d errors=%v", res.Failed, res.Errors)
+	}
+
+	postOK, _ := ListWorkflows(c, WithListWorkflowStatus(WorkflowStatusSuccess))
+	if len(postOK) != 0 {
+		t.Errorf("post-gc success rows = %d want 0", len(postOK))
+	}
+	// ERROR rows must be untouched.
+	postErr, _ := ListWorkflows(c, WithListWorkflowStatus(WorkflowStatusError))
+	if len(postErr) != len(preErr) {
+		t.Errorf("post-gc error rows = %d want %d", len(postErr), len(preErr))
+	}
+}
+
+func TestGCWorkflows_RejectsNonTerminalByDefault(t *testing.T) {
+	c := newTestContext(t)
+	_ = Launch(c)
+	_, err := GCWorkflows(c, GCWorkflowsInput{
+		Statuses:      []WorkflowStatusType{WorkflowStatusPending},
+		UpdatedBefore: time.Now(),
+	})
+	if err == nil {
+		t.Fatal("expected error for non-terminal status")
+	}
+}
+
+func TestGCWorkflows_RequiresInputs(t *testing.T) {
+	c := newTestContext(t)
+	_ = Launch(c)
+	if _, err := GCWorkflows(c, GCWorkflowsInput{}); err == nil {
+		t.Errorf("expected error for empty statuses")
+	}
+	if _, err := GCWorkflows(c, GCWorkflowsInput{
+		Statuses: []WorkflowStatusType{WorkflowStatusSuccess},
+	}); err == nil {
+		t.Errorf("expected error for zero UpdatedBefore")
+	}
+}
+
+func TestGCWorkflows_RespectsCutoff(t *testing.T) {
+	c := newTestContext(t)
+	wf := func(c *Context, _ string) (string, error) { return "ok", nil }
+	RegisterWorkflow[string, string](c, wf, WithWorkflowName("ok-cutoff"))
+	_ = Launch(c)
+
+	for i := 0; i < 3; i++ {
+		h, _ := RunWorkflow[string, string](c, wf, "")
+		_, _ = h.GetResult()
+	}
+
+	// A cutoff in the past should match nothing.
+	res, err := GCWorkflows(c, GCWorkflowsInput{
+		Statuses:      []WorkflowStatusType{WorkflowStatusSuccess},
+		UpdatedBefore: time.Now().Add(-time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Deleted != 0 {
+		t.Errorf("deleted=%d want 0 (cutoff in past)", res.Deleted)
+	}
+
+	rows, _ := ListWorkflows(c, WithListWorkflowStatus(WorkflowStatusSuccess))
+	if len(rows) != 3 {
+		t.Errorf("survivors=%d want 3", len(rows))
+	}
+}
+
 func TestListRegisteredWorkflows(t *testing.T) {
 	c := newTestContext(t)
 	wf := func(c *Context, _ string) (string, error) { return "", nil }

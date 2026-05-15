@@ -653,6 +653,9 @@
     });
     view.appendChild(paginationPanel);
 
+    // GC panel (collapsed by default — destructive, but useful).
+    view.appendChild(buildGCPanel(refresh));
+
     queueOptions.addEventListener("change", () => {
       setListFilter("queue", queueOptions.value);
       refresh();
@@ -772,6 +775,171 @@
     right.append(first, prev, next, last, jumpWrap);
     bar.append(left, right);
     panel.appendChild(bar);
+  }
+
+  // ---------------------------------------------------------------------
+  // Garbage collection
+  // ---------------------------------------------------------------------
+  // Terminal statuses are the only ones the backend will GC by default.
+  // We expose AllowNonTerminal as a separate, distinctly-styled checkbox
+  // because deleting a PENDING/ENQUEUED row can wipe a workflow that's
+  // still actively running.
+  const GC_TERMINAL_STATUSES = ["SUCCESS", "ERROR", "CANCELLED", "MAX_RECOVERY_ATTEMPTS_EXCEEDED"];
+  const GC_NONTERMINAL_STATUSES = ["PENDING", "ENQUEUED", "DELAYED"];
+
+  // Local YYYY-MM-DDTHH:mm string for <input type="datetime-local">.
+  function toLocalDatetimeInputValue(d) {
+    const pad = (n) => String(n).padStart(2, "0");
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate())
+         + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+  }
+
+  function buildGCPanel(onAfterRun) {
+    const wrap = el("details", { class: "panel", id: "gc-panel" });
+    const summary = el("summary", {
+      style: { cursor: "pointer", listStyle: "disclosure-closed", color: "var(--muted)", fontSize: "12px", textTransform: "uppercase", letterSpacing: ".8px", fontWeight: "600" },
+    }, "Garbage collection");
+    wrap.appendChild(summary);
+
+    const body = el("div", { style: { marginTop: "12px" } });
+    body.appendChild(el("div", { class: "muted", style: { marginBottom: "12px", fontSize: "12px", lineHeight: "1.5" } },
+      "Permanently delete workflows in the selected statuses whose " +
+      "last update is strictly older than the cutoff. Cascades to " +
+      "checkpointed steps, queued notifications, and event records. " +
+      "There is no undo."));
+
+    // Statuses
+    body.appendChild(el("div", { class: "muted", style: { fontSize: "11px", textTransform: "uppercase", letterSpacing: ".6px", marginBottom: "6px" } }, "Statuses"));
+    const termRow = el("div", { style: { display: "flex", flexWrap: "wrap", gap: "10px", marginBottom: "10px" } });
+    for (const s of GC_TERMINAL_STATUSES) {
+      const id = "gc-st-" + s;
+      const cb = el("input", { type: "checkbox", id, value: s, checked: s === "SUCCESS" });
+      termRow.appendChild(el("label", {
+        for: id,
+        style: { display: "flex", gap: "6px", alignItems: "center", fontSize: "12px", color: "var(--text)" },
+      }, [cb, document.createTextNode(s.replaceAll("_", " "))]));
+    }
+    body.appendChild(termRow);
+
+    // Non-terminal statuses (gated behind a separate checkbox).
+    const nonTermRow = el("div", { style: { display: "none", flexWrap: "wrap", gap: "10px", marginBottom: "10px" } });
+    nonTermRow.id = "gc-nonterminal-row";
+    for (const s of GC_NONTERMINAL_STATUSES) {
+      const id = "gc-st-" + s;
+      const cb = el("input", { type: "checkbox", id, value: s });
+      nonTermRow.appendChild(el("label", {
+        for: id,
+        style: { display: "flex", gap: "6px", alignItems: "center", fontSize: "12px", color: "var(--warn)" },
+      }, [cb, document.createTextNode(s.replaceAll("_", " "))]));
+    }
+    body.appendChild(nonTermRow);
+
+    const allowNT = el("input", {
+      type: "checkbox", id: "gc-allow-nonterminal",
+      onchange: () => {
+        const on = document.getElementById("gc-allow-nonterminal").checked;
+        document.getElementById("gc-nonterminal-row").style.display = on ? "flex" : "none";
+        if (!on) {
+          for (const s of GC_NONTERMINAL_STATUSES) {
+            const cb = document.getElementById("gc-st-" + s);
+            if (cb) cb.checked = false;
+          }
+        }
+      },
+    });
+    body.appendChild(el("label", {
+      for: "gc-allow-nonterminal",
+      style: { display: "flex", gap: "6px", alignItems: "center", fontSize: "12px", color: "var(--warn)", marginBottom: "14px" },
+    }, [allowNT, document.createTextNode("Also delete non-terminal workflows (dangerous — these may still be running)")]));
+
+    // Cutoff
+    body.appendChild(el("div", { class: "muted", style: { fontSize: "11px", textTransform: "uppercase", letterSpacing: ".6px", marginBottom: "6px" } }, "Updated before"));
+
+    const defaultCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24h ago
+    const cutoffInput = el("input", {
+      type: "datetime-local",
+      id: "gc-cutoff",
+      value: toLocalDatetimeInputValue(defaultCutoff),
+      style: { minWidth: "200px" },
+    });
+    const cutoffRow = el("div", { style: { display: "flex", flexWrap: "wrap", gap: "8px", alignItems: "center", marginBottom: "14px" } });
+    cutoffRow.appendChild(cutoffInput);
+
+    const presets = [
+      { label: "1 hour ago",   ms: 60 * 60 * 1000 },
+      { label: "1 day ago",    ms: 24 * 60 * 60 * 1000 },
+      { label: "1 week ago",   ms: 7 * 24 * 60 * 60 * 1000 },
+      { label: "1 month ago",  ms: 30 * 24 * 60 * 60 * 1000 },
+    ];
+    for (const p of presets) {
+      cutoffRow.appendChild(el("button", {
+        type: "button",
+        onclick: () => { cutoffInput.value = toLocalDatetimeInputValue(new Date(Date.now() - p.ms)); },
+      }, p.label));
+    }
+    body.appendChild(cutoffRow);
+
+    // Action row
+    const result = el("div", { id: "gc-result", style: { fontSize: "13px" } });
+    const runBtn = el("button", {
+      class: "danger",
+      onclick: () => runGC(result, onAfterRun),
+    }, "Run garbage collection");
+    body.appendChild(el("div", { style: { display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" } }, [runBtn, result]));
+
+    wrap.appendChild(body);
+    return wrap;
+  }
+
+  async function runGC(resultEl, onAfterRun) {
+    const statuses = [];
+    for (const s of [...GC_TERMINAL_STATUSES, ...GC_NONTERMINAL_STATUSES]) {
+      const cb = document.getElementById("gc-st-" + s);
+      if (cb && cb.checked) statuses.push(s);
+    }
+    if (statuses.length === 0) {
+      resultEl.innerHTML = `<span style="color:var(--err)">Pick at least one status to delete.</span>`;
+      return;
+    }
+    const cutoffStr = document.getElementById("gc-cutoff").value;
+    if (!cutoffStr) {
+      resultEl.innerHTML = `<span style="color:var(--err)">Pick an "Updated before" cutoff.</span>`;
+      return;
+    }
+    const cutoffDate = new Date(cutoffStr);
+    if (isNaN(cutoffDate.getTime())) {
+      resultEl.innerHTML = `<span style="color:var(--err)">Invalid cutoff timestamp.</span>`;
+      return;
+    }
+    const allowNT = document.getElementById("gc-allow-nonterminal").checked;
+
+    const summary = `Permanently delete all workflows in [${statuses.join(", ")}] last updated before ${cutoffDate.toLocaleString()}.\n\nThis cannot be undone. Continue?`;
+    if (!confirm(summary)) return;
+
+    resultEl.innerHTML = `<span class="muted"><span class="spinner"></span> running…</span>`;
+    try {
+      const res = await api("/workflows/gc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          statuses,
+          updated_before: cutoffDate.toISOString(),
+          allow_non_terminal: allowNT,
+        }),
+      });
+      const deleted = res.deleted || 0;
+      const failed  = res.failed  || 0;
+      const errs    = res.errors  || [];
+      let html = `<span style="color:var(--ok)">Deleted <strong>${deleted}</strong></span>`;
+      if (failed > 0) html += ` &middot; <span style="color:var(--err)">Failed <strong>${failed}</strong></span>`;
+      if (errs.length > 0) html += `<div class="muted" style="margin-top:6px;font-size:12px">${errs.map(escapeHTML).join("<br>")}</div>`;
+      resultEl.innerHTML = html;
+      toast(`GC complete: ${deleted} deleted` + (failed ? `, ${failed} failed` : ""), failed ? "err" : "ok");
+      if (typeof onAfterRun === "function") onAfterRun();
+    } catch (e) {
+      resultEl.innerHTML = `<span style="color:var(--err)">${escapeHTML(e.message)}</span>`;
+      toast(e.message, "err");
+    }
   }
 
   function renderStats(info) {

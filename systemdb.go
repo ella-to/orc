@@ -23,6 +23,7 @@ type systemDatabase interface {
 	cancelWorkflow(ctx context.Context, workflowID string) error
 	resumeWorkflow(ctx context.Context, workflowID string) error
 	deleteWorkflows(ctx context.Context, ids []string) error
+	gcWorkflows(ctx context.Context, in listWorkflowsInput) (int, error)
 	forkWorkflow(ctx context.Context, in forkWorkflowInput) (string, error)
 
 	// Steps.
@@ -81,6 +82,11 @@ type listWorkflowsInput struct {
 	ExecutorID        string
 	StartTime         time.Time
 	EndTime           time.Time
+	// UpdatedBefore filters by updated_at < UpdatedBefore. Distinct from
+	// EndTime (which filters by created_at) because GC and "stale" queries
+	// care about when a workflow last changed state, not when it was first
+	// created.
+	UpdatedBefore     time.Time
 	Limit             int
 	Offset            int
 	SortDescending    bool

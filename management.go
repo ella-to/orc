@@ -1,6 +1,10 @@
 package orc
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
 
 // ListWorkflowsOption configures ListWorkflows.
 type ListWorkflowsOption func(*listWorkflowsInput)
@@ -130,6 +134,105 @@ func ForkWorkflow[O any](c *Context, in ForkWorkflowInput) (WorkflowHandle[O], e
 // (steps, notifications, events).
 func DeleteWorkflows(c *Context, ids []string) error {
 	return c.systemDB.deleteWorkflows(c.ctx, ids)
+}
+
+// GCWorkflowsInput configures GCWorkflows.
+//
+// At least one Status must be supplied and UpdatedBefore must be set; both
+// safety rails are enforced server-side. By default only terminal statuses
+// are accepted (SUCCESS, ERROR, CANCELLED, MAX_RECOVERY_ATTEMPTS_EXCEEDED) so
+// you can never accidentally delete a workflow that is still running. Set
+// AllowNonTerminal to opt-in to deleting non-terminal rows (PENDING,
+// ENQUEUED, DELAYED) — useful for cleaning up zombie / abandoned executions.
+type GCWorkflowsInput struct {
+	Statuses         []WorkflowStatusType
+	UpdatedBefore    time.Time
+	AllowNonTerminal bool
+}
+
+// GCWorkflowsResult is the outcome of a GCWorkflows run.
+//
+// Deleted is the number of workflow_status rows that were actually removed
+// (cascading deletes of operation_outputs / notifications / workflow_events
+// happen inside the DB and are not counted).
+//
+// Failed is the number of rows that matched the filter but could not be
+// removed because the per-status DELETE returned an error. The
+// corresponding error messages are appended to Errors.
+type GCWorkflowsResult struct {
+	Deleted int      `json:"deleted"`
+	Failed  int      `json:"failed"`
+	Errors  []string `json:"errors,omitempty"`
+}
+
+// GCWorkflows hard-deletes workflows matching one or more Statuses whose
+// updated_at is strictly before UpdatedBefore. Cascade deletes
+// (operation_outputs, notifications, workflow_events) happen via the
+// schema's ON DELETE CASCADE, so it's a complete cleanup.
+//
+// GC runs each requested status in its own DELETE statement so a partial
+// failure (e.g. one status fails to delete) does not block the others.
+// The returned GCWorkflowsResult tallies deleted vs failed row counts and
+// surfaces per-status errors in Errors.
+//
+// Use this to keep the database compact: e.g. a daily cron that calls
+//
+//	orc.GCWorkflows(ctx, orc.GCWorkflowsInput{
+//	    Statuses:      []orc.WorkflowStatusType{orc.WorkflowStatusSuccess},
+//	    UpdatedBefore: time.Now().Add(-7 * 24 * time.Hour),
+//	})
+//
+// will purge all SUCCESS workflows older than a week.
+func GCWorkflows(c *Context, in GCWorkflowsInput) (GCWorkflowsResult, error) {
+	var res GCWorkflowsResult
+	if len(in.Statuses) == 0 {
+		return res, errors.New("orc: GCWorkflows requires at least one status")
+	}
+	if in.UpdatedBefore.IsZero() {
+		return res, errors.New("orc: GCWorkflows requires UpdatedBefore")
+	}
+	// De-duplicate statuses; reject non-terminal ones unless explicitly
+	// allowed. Doing both here means the systemDB layer never has to worry
+	// about safety semantics.
+	seen := make(map[WorkflowStatusType]struct{}, len(in.Statuses))
+	statuses := make([]WorkflowStatusType, 0, len(in.Statuses))
+	for _, s := range in.Statuses {
+		if s == "" {
+			continue
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		if !in.AllowNonTerminal && !s.IsTerminal() {
+			return res, fmt.Errorf("orc: GCWorkflows refuses non-terminal status %q (set AllowNonTerminal=true to override)", s)
+		}
+		seen[s] = struct{}{}
+		statuses = append(statuses, s)
+	}
+	if len(statuses) == 0 {
+		return res, errors.New("orc: GCWorkflows requires at least one valid status")
+	}
+
+	for _, s := range statuses {
+		filter := listWorkflowsInput{
+			Status:        []WorkflowStatusType{s},
+			UpdatedBefore: in.UpdatedBefore,
+		}
+		deleted, err := c.systemDB.gcWorkflows(c.ctx, filter)
+		if err != nil {
+			// Best-effort: count how many rows matched so we can report
+			// "this many failed to delete" rather than a vague error.
+			cnt, cntErr := c.systemDB.countWorkflows(c.ctx, filter)
+			if cntErr != nil {
+				cnt = 0
+			}
+			res.Failed += cnt
+			res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", s, err))
+			continue
+		}
+		res.Deleted += deleted
+	}
+	return res, nil
 }
 
 // GetWorkflowSteps returns the recorded checkpointed steps for a workflow.

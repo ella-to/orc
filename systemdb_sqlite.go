@@ -331,6 +331,10 @@ func listWorkflowsWhere(in listWorkflowsInput) (string, []any) {
 		conds = append(conds, "created_at <= ?")
 		args = append(args, timeToMs(in.EndTime))
 	}
+	if !in.UpdatedBefore.IsZero() {
+		conds = append(conds, "updated_at < ?")
+		args = append(args, timeToMs(in.UpdatedBefore))
+	}
 	if len(in.ExcludeQueueNames) > 0 {
 		conds = append(conds, "(queue_name IS NULL OR queue_name NOT IN ("+sqlite.Placeholders(len(in.ExcludeQueueNames))+"))")
 		for _, q := range in.ExcludeQueueNames {
@@ -502,6 +506,48 @@ func (s *sqliteSystemDB) deleteWorkflows(ctx context.Context, ids []string) erro
 		_, err = stmt.Step()
 		return err
 	})
+}
+
+// gcWorkflows performs a bulk DELETE matching the same WHERE clause as
+// listWorkflows, returning the number of rows actually removed. The Limit /
+// Offset / SortDescending fields on `in` are ignored — GC always operates on
+// every matching row. Cascade deletes (operation_outputs, notifications,
+// workflow_events) are handled by the schema's ON DELETE CASCADE.
+//
+// Callers (see GCWorkflows in management.go) typically pre-validate that the
+// requested statuses are terminal so a long-running workflow cannot be
+// removed mid-flight.
+func (s *sqliteSystemDB) gcWorkflows(ctx context.Context, in listWorkflowsInput) (int, error) {
+	where, args := listWorkflowsWhere(in)
+	if where == "" {
+		// Refuse an unbounded delete; this would wipe the whole table.
+		return 0, wrapError(ErrUnknown, nil, "gc requires at least one filter")
+	}
+	q := "DELETE FROM workflow_status " + where + " RETURNING workflow_uuid;"
+	var n int
+	err := s.db.Exec(ctx, func(ctx context.Context, conn *sqlite.Conn) (err error) {
+		defer conn.Save(&err)
+		stmt, err := conn.Prepare(ctx, q, args...)
+		if err != nil {
+			return err
+		}
+		defer stmt.Reset()
+		for {
+			hasRow, err := stmt.Step()
+			if err != nil {
+				return err
+			}
+			if !hasRow {
+				break
+			}
+			n++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, wrapError(ErrUnknown, err, "gc workflows")
+	}
+	return n, nil
 }
 
 func (s *sqliteSystemDB) forkWorkflow(ctx context.Context, in forkWorkflowInput) (string, error) {

@@ -206,6 +206,27 @@ type AdminDeleteResponse struct {
 	Deleted []string `json:"deleted"`
 }
 
+// AdminGCRequest is the request body for POST /workflows/gc.
+//
+// Statuses must be non-empty. UpdatedBefore is required and accepts an
+// RFC3339 timestamp; only workflows whose updated_at is strictly less than
+// UpdatedBefore are considered. AllowNonTerminal opts in to GC-ing
+// non-terminal statuses (PENDING / ENQUEUED / DELAYED) — off by default
+// so a runaway request can't wipe live workflows.
+type AdminGCRequest struct {
+	Statuses         []WorkflowStatusType `json:"statuses"`
+	UpdatedBefore    time.Time            `json:"updated_before"`
+	AllowNonTerminal bool                 `json:"allow_non_terminal,omitempty"`
+}
+
+// AdminGCResponse is the response body for POST /workflows/gc, mirroring
+// orc.GCWorkflowsResult.
+type AdminGCResponse struct {
+	Deleted int      `json:"deleted"`
+	Failed  int      `json:"failed"`
+	Errors  []string `json:"errors,omitempty"`
+}
+
 // adminError is the response body for any non-2xx outcome.
 type adminError struct {
 	Error string `json:"error"`
@@ -249,6 +270,7 @@ func AdminHandler(c *Context, opts ...AdminOption) http.Handler {
 	// Listing.
 	mux.HandleFunc("GET /workflows", a.handleListWorkflows)
 	mux.HandleFunc("POST /workflows/delete", a.handleBulkDelete)
+	mux.HandleFunc("POST /workflows/gc", a.handleGC)
 
 	// Per-workflow.
 	mux.HandleFunc("GET /workflows/{id}", a.handleGetWorkflow)
@@ -313,6 +335,7 @@ func (a *adminAPI) handleIndex(w http.ResponseWriter, r *http.Request) {
 		{"POST", "/workflows/{id}/resume", "resume a failed/cancelled workflow"},
 		{"POST", "/workflows/{id}/fork", "fork from a step (body: {start_from_step, new_workflow_id})"},
 		{"POST", "/workflows/delete", "bulk delete (body: {ids: [...]})"},
+		{"POST", "/workflows/gc", "garbage-collect: delete rows in given statuses with updated_at < cutoff (body: {statuses: [...], updated_before: \"RFC3339\", allow_non_terminal?: bool})"},
 		{"GET", "/queues", "registered queues + pending/running counts"},
 		{"GET", "/registered", "registered workflow names"},
 	}
@@ -730,6 +753,57 @@ func (a *adminAPI) handleBulkDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.writeJSON(w, http.StatusOK, AdminDeleteResponse{Deleted: req.IDs})
+}
+
+func (a *adminAPI) handleGC(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		a.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(body) == 0 {
+		a.writeError(w, http.StatusBadRequest, errors.New("empty request body"))
+		return
+	}
+	var req AdminGCRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		a.writeError(w, http.StatusBadRequest, fmt.Errorf("invalid json body: %w", err))
+		return
+	}
+	// Normalise statuses (uppercase + trim) before handing off to
+	// GCWorkflows so users can send "success" lowercase if they like.
+	statuses := make([]WorkflowStatusType, 0, len(req.Statuses))
+	for _, s := range req.Statuses {
+		t := strings.TrimSpace(strings.ToUpper(string(s)))
+		if t == "" {
+			continue
+		}
+		statuses = append(statuses, WorkflowStatusType(t))
+	}
+	if len(statuses) == 0 {
+		a.writeError(w, http.StatusBadRequest, errors.New("statuses must be a non-empty array"))
+		return
+	}
+	if req.UpdatedBefore.IsZero() {
+		a.writeError(w, http.StatusBadRequest, errors.New("updated_before is required (RFC3339 timestamp)"))
+		return
+	}
+	res, err := GCWorkflows(a.ctx, GCWorkflowsInput{
+		Statuses:         statuses,
+		UpdatedBefore:    req.UpdatedBefore,
+		AllowNonTerminal: req.AllowNonTerminal,
+	})
+	if err != nil {
+		// Validation errors from the public API surface as 400; anything
+		// else (e.g. a true I/O failure) bubbles up as 500.
+		a.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	a.writeJSON(w, http.StatusOK, AdminGCResponse{
+		Deleted: res.Deleted,
+		Failed:  res.Failed,
+		Errors:  res.Errors,
+	})
 }
 
 func (a *adminAPI) handleListQueues(w http.ResponseWriter, r *http.Request) {
