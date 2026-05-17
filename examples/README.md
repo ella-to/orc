@@ -20,6 +20,7 @@ self-contained: just `cd` into one and `go run .`.
 | 12 | [`12-priority-queue`](./12-priority-queue)                          | `WithPriorityEnabled` queue dispatches lowest-priority-number first.                       |
 | 13 | [`13-status-polling`](./13-status-polling)                          | A long-running workflow whose status is polled by a watcher goroutine.                     |
 | 14 | [`14-admin-http`](./14-admin-http)                                  | Mount `orc.AdminHandler` in `net/http` for live monitoring, cancel, resume, fork & tree.   |
+| 15 | [`15-http-context-cancel`](./15-http-context-cancel)                | `WithCallerContext` ties a workflow's lifetime to an HTTP request; cancel = CANCELLED.     |
 
 ## Running
 

@@ -36,6 +36,7 @@ in-flight workflows from their last checkpoint when it next launches.
 - **Durable sleep** — `Sleep` survives restarts.
 - **Cron scheduling** — `WithSchedule("* * * * * *")` registers a cron-driven workflow.
 - **Recovery** — interrupted workflows automatically resume on `Launch`.
+- **Caller-scoped cancellation** — opt in to `WithCallerContext(r.Context())` to tie a workflow's lifetime to an HTTP request (or any `context.Context`); the workflow stops when the caller disconnects and `GetResult` returns `context.Canceled`.
 - **Management APIs** — `ListWorkflows`, `CancelWorkflow`, `ResumeWorkflow`, `ForkWorkflow`, `DeleteWorkflows`, `GCWorkflows`.
 - **Admin HTTP handler** — `orc.AdminHandler(ctx)` returns a `http.Handler` you can mount under any prefix in your own `net/http` mux for live monitoring, cancel/resume/fork, parent/child tree inspection, and per-workflow durations.
 - **Bundled web dashboard** — `web.Handler("/admin")` from the `ella.to/orc/web` sub-package serves a single-file HTML/JS UI that talks to the admin handler — paginated workflow list with filters, live status counters, per-workflow detail with steps/children/tree, and stop / restart / fork / delete buttons. No build step, no external assets.
@@ -167,6 +168,7 @@ h, err := orc.RunWorkflow[MyInput, MyOutput](ctx, myWorkflow, in,
     orc.WithPriority(1),
     orc.WithWorkflowTimeout(30*time.Second),
     orc.WithWorkflowDelay(5*time.Second), // delay first dispatch
+    orc.WithCallerContext(r.Context()),   // cancel with caller (e.g. HTTP request)
 )
 out, err := h.GetResult(orc.WithHandleTimeout(time.Minute))
 ```
@@ -529,6 +531,65 @@ built-in `Sleep` / `Recv`, plus any HTTP/DB calls in your own step
 closures that take `ctx`) return promptly. If a workflow swallows the
 cancel error and tries to return normally, the runtime still records
 the run as `CANCELLED`.
+
+### Example 10b — Cancel a workflow when the HTTP request goes away
+
+Use `orc.WithCallerContext` when a workflow is logically scoped to a
+caller's lifetime (typically an HTTP handler) and should stop work the
+moment the caller disconnects:
+
+```go
+func runHandler(ctx *orc.Context) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        h, err := orc.RunWorkflow[string, string](ctx, slowJob, "label",
+            orc.WithCallerContext(r.Context()))
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+
+        result, err := h.GetResult(orc.WithHandleTimeout(time.Minute))
+        switch {
+        case errors.Is(err, context.Canceled):
+            // Client aborted. The workflow row is already marked CANCELLED.
+            http.Error(w, "request cancelled", 499)
+            return
+        case errors.Is(err, context.DeadlineExceeded):
+            http.Error(w, "request timed out", http.StatusGatewayTimeout)
+            return
+        case err != nil:
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+        fmt.Fprintln(w, result)
+    }
+}
+```
+
+What happens when the client disconnects:
+
+- `r.Context()` is cancelled by `net/http`.
+- ORC propagates the cancellation into the workflow's per-run context
+  with the same cause (`context.Canceled`).
+- Steps that honour `ctx.Done()` — the built-in `orc.Sleep` / `orc.Recv`,
+  plus any HTTP/DB calls in your own step closures that take the step's
+  `ctx` — return promptly with `context.Canceled`.
+- The workflow's `GetResult` returns `context.Canceled`, so the handler
+  can detect it via `errors.Is(err, context.Canceled)`.
+- The workflow row is recorded as `CANCELLED` (not `ERROR`), with the
+  original error message preserved on the row's `error` field.
+
+This is **opt-in**. By default ORC workflows are decoupled from any
+caller's context — they keep running even after `RunWorkflow` returns,
+which is the right default for durable background work. Reach for
+`WithCallerContext` only when you want request-scoped lifetime.
+
+`WithCallerContext` only takes effect for workflows that execute in
+this process (no `WithQueue`). For queued workflows, observe the
+caller context yourself and call `orc.CancelWorkflow` when it fires.
+
+See [`examples/15-http-context-cancel`](./examples/15-http-context-cancel)
+for a runnable demo.
 
 ### Example 11 — Resume a failed workflow
 

@@ -22,6 +22,7 @@ type runWorkflowOptions struct {
 	deadline        time.Time
 	parentID        string
 	delay           time.Duration
+	callerCtx       context.Context
 }
 
 // WithWorkflowID assigns an explicit, deterministic workflow ID. If a row
@@ -57,6 +58,31 @@ func WithWorkflowTimeout(d time.Duration) WorkflowOption {
 // WithWorkflowDelay delays an enqueued workflow's first dispatch.
 func WithWorkflowDelay(d time.Duration) WorkflowOption {
 	return func(o *runWorkflowOptions) { o.delay = d }
+}
+
+// WithCallerContext binds the workflow run to an external context.Context
+// (typically an HTTP request's r.Context()). When that context is cancelled,
+// the workflow's per-run context is cancelled with the same cause —
+// usually context.Canceled (client disconnect) or context.DeadlineExceeded
+// (caller-side timeout). Steps that honor ctx.Done() (Sleep, Recv with
+// timeout, and any RunAsStep closure that takes ctx) return promptly.
+//
+// The workflow row is recorded as CANCELLED with the original error
+// message preserved, and the in-process WorkflowHandle.GetResult call
+// returns the original context error so callers can write
+// errors.Is(err, context.Canceled).
+//
+// This option is OPT-IN. By default ORC workflows are decoupled from any
+// caller's context — they keep running even after RunWorkflow returns.
+// Use WithCallerContext when the workflow is logically scoped to the
+// caller's lifetime (e.g. request-scoped work in an HTTP handler) and
+// should stop work if the caller goes away.
+//
+// WithCallerContext only takes effect for workflows that execute in this
+// process (i.e. without WithQueue). For queued workflows, use
+// CancelWorkflow from the same parent goroutine when the caller cancels.
+func WithCallerContext(ctx context.Context) WorkflowOption {
+	return func(o *runWorkflowOptions) { o.callerCtx = ctx }
 }
 
 // runOptions resolves to a runWorkflowOptions value.
@@ -168,6 +194,15 @@ func RunWorkflow[I any, O any](c *Context, fn any, input I, opts ...WorkflowOpti
 	// Otherwise execute right now in a new goroutine.
 	resultCh := make(chan workflowOutcome, 1)
 	wfCtx, cancel := context.WithCancelCause(c.ctx)
+
+	// If the caller bound an external context (WithCallerContext), propagate
+	// its cancellation into wfCtx. The watcher exits as soon as either
+	// context is done, so it's reaped whether the caller cancels or the
+	// workflow finishes first.
+	if opt.callerCtx != nil {
+		go watchCallerContext(opt.callerCtx, wfCtx, cancel)
+	}
+
 	c.core.active.Store(wfID, &activeWorkflow{resultCh: resultCh, cancel: cancel})
 	c.core.workflowsWg.Add(1)
 	go func() {
@@ -178,6 +213,22 @@ func RunWorkflow[I any, O any](c *Context, fn any, input I, opts ...WorkflowOpti
 	}()
 
 	return &directHandle[O]{id: wfID, ctx: c, result: resultCh}, nil
+}
+
+// watchCallerContext propagates cancellation from an external caller-supplied
+// context.Context into a workflow's per-run context. It exits as soon as
+// either side is done, so there's no leaked goroutine when the workflow
+// completes normally before the caller cancels.
+func watchCallerContext(callerCtx, wfCtx context.Context, cancel context.CancelCauseFunc) {
+	select {
+	case <-callerCtx.Done():
+		cause := context.Cause(callerCtx)
+		if cause == nil {
+			cause = callerCtx.Err()
+		}
+		cancel(cause)
+	case <-wfCtx.Done():
+	}
 }
 
 // runWorkflowExecution drives the workflow function with full durability:
@@ -229,7 +280,22 @@ func runWorkflowExecution(c *Context, entry *registryEntry, wfID, inputStr strin
 
 	wc := withWFState(c, subCtx, st)
 
-	encOut, runErr := entry.Wrapper(wc, inputStr)
+	// If the per-run context is already cancelled (e.g. caller passed an
+	// already-cancelled context via WithCallerContext, or CancelWorkflow
+	// raced ahead of the goroutine), skip the wrapper entirely. Otherwise
+	// the first step's DB query would race against the cancelled context
+	// and surface as a SQLite "interrupted" error instead of the intended
+	// cancellation cause.
+	var encOut string
+	var runErr error
+	if err := subCtx.Err(); err != nil {
+		runErr = err
+		if cause := context.Cause(subCtx); cause != nil {
+			runErr = cause
+		}
+	} else {
+		encOut, runErr = entry.Wrapper(wc, inputStr)
+	}
 
 	// Translate context cancellation into the appropriate ORC error. When the
 	// per-workflow context is cancelled with a cause (e.g. by CancelWorkflow),
@@ -244,14 +310,21 @@ func runWorkflowExecution(c *Context, entry *registryEntry, wfID, inputStr strin
 	}
 
 	// If the workflow was explicitly cancelled (CancelWorkflow or remote
-	// cancel poller cancelled wfCtx with ErrWorkflowCancelledErr) but the
-	// wrapper swallowed the error and returned normally, honor the cancel.
-	// Otherwise a workflow that does `_, _ = Sleep(c, ...)` could finish
-	// "successfully" after a cancel.
+	// cancel poller cancelled wfCtx with ErrWorkflowCancelledErr, or the
+	// caller-supplied context cancelled with context.Canceled /
+	// context.DeadlineExceeded) but the wrapper swallowed the error and
+	// returned normally, honor the cancel. Otherwise a workflow that does
+	// `_, _ = Sleep(c, ...)` could finish "successfully" after a cancel.
 	if runErr == nil {
-		if cause := context.Cause(wfCtx); cause != nil && errors.Is(cause, ErrWorkflowCancelledErr) {
-			runErr = ErrWorkflowCancelledErr
-			encOut = ""
+		if cause := context.Cause(wfCtx); cause != nil {
+			switch {
+			case errors.Is(cause, ErrWorkflowCancelledErr):
+				runErr = ErrWorkflowCancelledErr
+				encOut = ""
+			case errors.Is(cause, context.Canceled), errors.Is(cause, context.DeadlineExceeded):
+				runErr = cause
+				encOut = ""
+			}
 		}
 	}
 
@@ -286,6 +359,13 @@ func finalizeWorkflow(c *Context, _ *registryEntry, wfID string, encOut string, 
 		case errors.Is(runErr, ErrWorkflowCancelledErr):
 			in.Status = WorkflowStatusCancelled
 		case errors.Is(runErr, ErrWorkflowTimedOutErr):
+			in.Status = WorkflowStatusCancelled
+			es := runErr.Error()
+			in.ErrorString = &es
+		case errors.Is(runErr, context.Canceled), errors.Is(runErr, context.DeadlineExceeded):
+			// Caller-supplied context (WithCallerContext) cancelled. Record
+			// the row as CANCELLED so admin views distinguish it from real
+			// failures, but preserve the original std-library error message.
 			in.Status = WorkflowStatusCancelled
 			es := runErr.Error()
 			in.ErrorString = &es
