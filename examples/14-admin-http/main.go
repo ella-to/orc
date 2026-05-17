@@ -6,7 +6,7 @@
 // inspection.
 //
 // In addition to the JSON API, this example also mounts the bundled
-// HTML/JS dashboard from package web at /ui/. Open
+// HTML/JS dashboard from package web at /admin/ui/. Open
 // http://localhost:8080/ in a browser and you'll be redirected to the UI.
 //
 // The admin handler purposely has NO authentication or authorization built
@@ -17,7 +17,7 @@
 //
 // While it's running:
 //
-//	open http://localhost:8080/ui/                              # dashboard
+//	open http://localhost:8080/admin/ui/                        # dashboard
 //	curl http://localhost:8080/admin/                           # discovery
 //	curl http://localhost:8080/admin/health
 //	curl http://localhost:8080/admin/info
@@ -146,13 +146,13 @@ func main() {
 		orc.WithAdminPrettyJSON(),
 	)))
 
-	// Mount the bundled HTML/JS dashboard under /ui. The UI talks back
-	// to the admin handler at "/admin" (passed in below).
-	mux.Handle("/ui/", http.StripPrefix("/ui", web.Handler("/admin")))
+	// Mount the bundled HTML/JS dashboard under /admin/ui. Keeping both
+	// API and UI under /admin makes deployment and access control simpler.
+	mux.Handle("/admin/ui/", http.StripPrefix("/admin/ui", web.Handler("/admin")))
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
-			http.Redirect(w, r, "/ui/", http.StatusFound)
+			http.Redirect(w, r, "/admin/ui/", http.StatusFound)
 			return
 		}
 		http.NotFound(w, r)
@@ -172,7 +172,7 @@ func main() {
 	}()
 
 	log.Println("admin demo listening on http://localhost:8080  (Ctrl-C to stop)")
-	log.Println("dashboard:  http://localhost:8080/ui/")
+	log.Println("dashboard:  http://localhost:8080/admin/ui/")
 	log.Println("admin api:  http://localhost:8080/admin/")
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
