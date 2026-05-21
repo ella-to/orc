@@ -479,6 +479,33 @@
         padding-right: 2.25rem;
       }
 
+      .result-card__code-body[data-collapsed-max-height] {
+        max-height: var(--collapsed-max-height, 220px);
+      }
+
+      .result-card--expanded .result-card__code-body {
+        max-height: min(60vh, 520px);
+      }
+
+      .result-card__toggle {
+        border-radius: 999px;
+        padding: 3px 10px;
+        font-size: 11px;
+        line-height: 1.2;
+      }
+
+      .steps-main-row td {
+        border-bottom: none;
+      }
+
+      .steps-result-row td {
+        padding-top: 0;
+      }
+
+      .steps-result-row .result-card {
+        width: 100%;
+      }
+
       .sr-only {
         position: absolute;
         width: 1px;
@@ -1981,14 +2008,14 @@
           const tbl = el("table", { class: "steps-table" });
           tbl.innerHTML = `
       <thead><tr>
-        <th>#</th><th>Name</th><th>Status</th><th>Result</th><th class="nowrap">Created</th>
+        <th>#</th><th>Name</th><th>Status</th><th class="nowrap">Created</th>
       </tr></thead>
       <tbody></tbody>`;
           const tb = tbl.querySelector("tbody");
           for (const s of steps) {
             const status = s.error ? "ERROR" : "SUCCESS";
-            const tr = el("tr");
-            tr.appendChild(el("td", { class: "mono" }, String(s.step_id)));
+            const tr = el("tr", { class: "steps-main-row" });
+            tr.appendChild(el("td", { class: "mono nowrap" }, String(s.step_id)));
             const nameTd = el("td", null, s.step_name || "—");
             if (s.child_workflow_id) {
               nameTd.appendChild(document.createTextNode(" "));
@@ -2007,15 +2034,6 @@
             }
             tr.appendChild(nameTd);
             tr.appendChild(el("td", null, statusBadge(status, false)));
-            const resultTd = el("td");
-            if (s.error) {
-              resultTd.appendChild(renderStepResult(s.error, true));
-            } else if (s.output !== undefined && s.output !== null) {
-              resultTd.appendChild(renderStepResult(s.output, false));
-            } else {
-              resultTd.appendChild(el("span", { class: "muted" }, "—"));
-            }
-            tr.appendChild(resultTd);
             tr.appendChild(
               el(
                 "td",
@@ -2024,6 +2042,20 @@
               ),
             );
             tb.appendChild(tr);
+
+            const resultTr = el("tr", { class: "steps-result-row" });
+            const resultTd = el("td", { colspan: "4" });
+            if (s.error) {
+              resultTd.appendChild(renderStepResult(s.error, true, { fullWidth: true }));
+            } else if (s.output !== undefined && s.output !== null) {
+              resultTd.appendChild(
+                renderStepResult(s.output, false, { fullWidth: true }),
+              );
+            } else {
+              resultTd.appendChild(el("span", { class: "muted" }, "—"));
+            }
+            resultTr.appendChild(resultTd);
+            tb.appendChild(resultTr);
           }
           root.appendChild(tbl);
         }
@@ -2166,12 +2198,16 @@
           };
         }
 
-        function renderStepResult(value, isError) {
+        function renderStepResult(value, isError, opts) {
+          const options = opts || {};
           const summary = summarizeStepResult(value);
           const card = el("div", {
             class: "result-card" + (isError ? " result-card--error" : ""),
           });
           const header = el("div", { class: "result-card__bar" });
+          const actions = el("div", {
+            style: { display: "flex", alignItems: "center", gap: "8px" },
+          });
           header.appendChild(
             el("div", { class: "result-card__meta" }, [
               el(
@@ -2188,6 +2224,7 @@
             ]),
           );
 
+          header.appendChild(actions);
           const copyResult = async (event) => {
             if (event) event.stopPropagation();
             try {
@@ -2225,6 +2262,31 @@
             ),
             el("pre", { class: "code result-card__code-body" }, summary.raw),
           ]);
+
+          const codeBody = codeWrap.querySelector(".result-card__code-body");
+
+          if (options.fullWidth) {
+            const lineCount = summary.raw ? summary.raw.split("\n").length : 1;
+            const collapsedHeight = Math.max(120, Math.min(300, lineCount * 18 + 24));
+            codeBody.style.setProperty("--collapsed-max-height", collapsedHeight + "px");
+            codeBody.setAttribute("data-collapsed-max-height", "true");
+
+            const isLarge = lineCount > 10 || summary.raw.length > 1400;
+            if (isLarge) {
+              const toggle = el(
+                "button",
+                { class: "result-card__toggle", type: "button" },
+                "Expand",
+              );
+              toggle.addEventListener("click", (event) => {
+                event.stopPropagation();
+                const expanded = card.classList.toggle("result-card--expanded");
+                toggle.textContent = expanded ? "Collapse" : "Expand";
+              });
+              actions.appendChild(toggle);
+            }
+          }
+
           card.appendChild(header);
           card.appendChild(codeWrap);
           return card;
