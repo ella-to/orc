@@ -74,14 +74,25 @@ type updateWorkflowStatusInput struct {
 	Now           time.Time
 }
 
+type listWorkflowSortBy string
+
+const (
+	listWorkflowSortCreated  listWorkflowSortBy = "created"
+	listWorkflowSortName     listWorkflowSortBy = "name"
+	listWorkflowSortStatus   listWorkflowSortBy = "status"
+	listWorkflowSortQueue    listWorkflowSortBy = "queue"
+	listWorkflowSortAttempts listWorkflowSortBy = "attempts"
+	listWorkflowSortDuration listWorkflowSortBy = "duration"
+)
+
 type listWorkflowsInput struct {
-	WorkflowIDs       []string
-	Status            []WorkflowStatusType
-	WorkflowName      string
-	QueueName         string
-	ExecutorID        string
-	StartTime         time.Time
-	EndTime           time.Time
+	WorkflowIDs  []string
+	Status       []WorkflowStatusType
+	WorkflowName string
+	QueueName    string
+	ExecutorID   string
+	StartTime    time.Time
+	EndTime      time.Time
 	// UpdatedBefore filters by updated_at < UpdatedBefore. Distinct from
 	// EndTime (which filters by created_at) because GC and "stale" queries
 	// care about when a workflow last changed state, not when it was first
@@ -89,6 +100,7 @@ type listWorkflowsInput struct {
 	UpdatedBefore     time.Time
 	Limit             int
 	Offset            int
+	SortBy            listWorkflowSortBy
 	SortDescending    bool
 	LoadInputOutput   bool
 	WithChildren      bool

@@ -771,7 +771,9 @@ All parameters are optional and may be combined.
 | `limit`    | int                                          | Page size (default `100`, capped at `1000`). Configurable via `WithAdminDefaultListLimit` / `WithAdminMaxListLimit`. |
 | `offset`   | int                                          | Pagination offset (rows to skip). Mutually-exclusive with `page` — when both are set, `page` wins. |
 | `page`     | int (1-based)                                | Convenience alternative to `offset`. Equivalent to `offset = (page - 1) * limit`. Returns `400` for `page < 1`. |
-| `desc`     | bool (`true`/`false`)                        | Sort by `created_at` descending. Default `false` (ascending).                        |
+| `sort_by`  | enum (`created`,`name`,`status`,`queue`,`attempts`,`duration`) | Column to sort by. Default `created`.                                                 |
+| `sort_dir` | enum (`asc`,`desc`)                          | Sort direction. Default `desc` in the bundled UI; API default is legacy `desc=false` unless explicitly set. |
+| `desc`     | bool (`true`/`false`)                        | Legacy fallback when `sort_dir` is absent. Kept for compatibility.                   |
 | `load_io`  | bool                                         | Include `input` / `output` in each row. Default `true`.                              |
 
 ### Response shape — `AdminWorkflowView`
@@ -918,10 +920,13 @@ curl http://localhost:8080/admin/info
 curl 'http://localhost:8080/admin/workflows?status=PENDING&status=ENQUEUED'
 
 # paginated: page 3 of completed workflows, 50 per page, newest first
-curl 'http://localhost:8080/admin/workflows?status=SUCCESS&desc=true&limit=50&page=3'
+curl 'http://localhost:8080/admin/workflows?status=SUCCESS&sort_by=created&sort_dir=desc&limit=50&page=3'
 
 # equivalent using offset
-curl 'http://localhost:8080/admin/workflows?status=SUCCESS&desc=true&limit=50&offset=100'
+curl 'http://localhost:8080/admin/workflows?status=SUCCESS&sort_by=created&sort_dir=desc&limit=50&offset=100'
+
+# sort alphabetically by name
+curl 'http://localhost:8080/admin/workflows?sort_by=name&sort_dir=asc&limit=25'
 
 # detail for one workflow (status + steps + children + duration)
 curl http://localhost:8080/admin/workflows/parent-1

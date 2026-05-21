@@ -82,12 +82,12 @@ type AdminWorkflowView struct {
 	ForkedFrom         string             `json:"forked_from,omitempty"`
 	CronSchedule       string             `json:"cron_schedule,omitempty"`
 
-	TimeoutMs    int64     `json:"timeout_ms,omitempty"`
-	Deadline     time.Time `json:"deadline,omitempty"`
-	DelayUntil   time.Time `json:"delay_until,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	StartedAt    time.Time `json:"started_at,omitempty"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	TimeoutMs  int64     `json:"timeout_ms,omitempty"`
+	Deadline   time.Time `json:"deadline,omitempty"`
+	DelayUntil time.Time `json:"delay_until,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	StartedAt  time.Time `json:"started_at,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at"`
 
 	// Computed fields:
 
@@ -325,7 +325,7 @@ func (a *adminAPI) handleIndex(w http.ResponseWriter, r *http.Request) {
 	routes := []route{
 		{"GET", "/health", "liveness probe"},
 		{"GET", "/info", "executor info, registered workflows, queue summaries, status counts"},
-		{"GET", "/workflows", "list workflows (filters: status, name, queue, executor, id, start, end; pagination: limit, offset, page; sort: desc; payload: load_io). Response includes page, page_size and total."},
+		{"GET", "/workflows", "list workflows (filters: status, name, queue, executor, id, start, end; pagination: limit, offset, page; sort: sort_by + sort_dir, legacy desc; payload: load_io). Response includes page, page_size and total."},
 		{"GET", "/workflows/{id}", "workflow detail (status + duration + steps + direct children)"},
 		{"DELETE", "/workflows/{id}", "delete a single workflow and dependent rows"},
 		{"GET", "/workflows/{id}/steps", "list checkpointed steps"},
@@ -478,7 +478,31 @@ func (a *adminAPI) parseListInput(r *http.Request) (listWorkflowsInput, error) {
 		QueueName:       q.Get("queue"),
 		ExecutorID:      q.Get("executor"),
 		WorkflowIDs:     q["id"],
+		SortBy:          listWorkflowSortCreated,
 		SortDescending:  parseBool(q.Get("desc"), false),
+	}
+	if v := strings.TrimSpace(strings.ToLower(q.Get("sort_by"))); v != "" {
+		switch v {
+		case string(listWorkflowSortCreated),
+			string(listWorkflowSortName),
+			string(listWorkflowSortStatus),
+			string(listWorkflowSortQueue),
+			string(listWorkflowSortAttempts),
+			string(listWorkflowSortDuration):
+			in.SortBy = listWorkflowSortBy(v)
+		default:
+			return listWorkflowsInput{}, fmt.Errorf("invalid sort_by: %q", q.Get("sort_by"))
+		}
+	}
+	if v := strings.TrimSpace(strings.ToLower(q.Get("sort_dir"))); v != "" {
+		switch v {
+		case "asc":
+			in.SortDescending = false
+		case "desc":
+			in.SortDescending = true
+		default:
+			return listWorkflowsInput{}, fmt.Errorf("invalid sort_dir: %q", q.Get("sort_dir"))
+		}
 	}
 	for _, s := range q["status"] {
 		s = strings.TrimSpace(s)

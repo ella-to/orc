@@ -18,9 +18,9 @@ var migrationsFS embed.FS
 
 // sqliteSystemDB is the SQLite-backed implementation of systemDatabase.
 type sqliteSystemDB struct {
-	db        *sqlite.Database
-	owns      bool // whether we should Close() the database on shutdown
-	logger    *slog.Logger
+	db         *sqlite.Database
+	owns       bool // whether we should Close() the database on shutdown
+	logger     *slog.Logger
 	serializer Serializer
 }
 
@@ -354,6 +354,29 @@ func (s *sqliteSystemDB) listWorkflows(ctx context.Context, in listWorkflowsInpu
 	if in.SortDescending {
 		order = "DESC"
 	}
+	var orderBy string
+	switch in.SortBy {
+	case "", listWorkflowSortCreated:
+		orderBy = "created_at"
+	case listWorkflowSortName:
+		orderBy = "COALESCE(name, '')"
+	case listWorkflowSortStatus:
+		orderBy = "status"
+	case listWorkflowSortQueue:
+		orderBy = "COALESCE(queue_name, '')"
+	case listWorkflowSortAttempts:
+		orderBy = "attempts"
+	case listWorkflowSortDuration:
+		// Duration matches AdminWorkflowView duration semantics:
+		// - no start timestamp => 0
+		// - running (PENDING) => now - started_at
+		// - terminal / stopped => updated_at - started_at (clamped at 0)
+		// Timestamps are stored as unix milliseconds.
+		now := nowMs()
+		orderBy = fmt.Sprintf("CASE WHEN started_at_ms IS NULL OR started_at_ms = 0 THEN 0 WHEN status = '%s' THEN MAX(0, %d - started_at_ms) ELSE MAX(0, updated_at - started_at_ms) END", string(WorkflowStatusPending), now)
+	default:
+		orderBy = "created_at"
+	}
 	limit := in.Limit
 	if limit <= 0 {
 		limit = 1000
@@ -367,8 +390,8 @@ func (s *sqliteSystemDB) listWorkflows(ctx context.Context, in listWorkflowsInpu
 		       attempts, input, forked_from, parent_workflow_id, cron_schedule
 		FROM workflow_status
 		%s
-		ORDER BY created_at %s
-		LIMIT ? OFFSET ?;`, where, order)
+		ORDER BY %s %s, created_at %s, workflow_uuid %s
+		LIMIT ? OFFSET ?;`, where, orderBy, order, order, order)
 	args = append(args, limit, in.Offset)
 
 	var out []WorkflowStatus

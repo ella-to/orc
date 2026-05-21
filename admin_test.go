@@ -214,6 +214,63 @@ func TestAdmin_ListWorkflows_Filters(t *testing.T) {
 	}
 }
 
+func TestAdmin_ListWorkflows_Sorting(t *testing.T) {
+	c := newTestContext(t)
+	wfA := func(c *Context, _ int) (int, error) { return 1, nil }
+	wfB := func(c *Context, _ int) (int, error) { return 1, nil }
+	RegisterWorkflow[int, int](c, wfA, WithWorkflowName("alpha"))
+	RegisterWorkflow[int, int](c, wfB, WithWorkflowName("beta"))
+	_ = Launch(c)
+
+	h1, _ := RunWorkflow[int, int](c, wfA, 0, WithWorkflowID("sort-1"))
+	_, _ = h1.GetResult()
+	time.Sleep(5 * time.Millisecond)
+	h2, _ := RunWorkflow[int, int](c, wfB, 0, WithWorkflowID("sort-2"))
+	_, _ = h2.GetResult()
+
+	srv := newAdminTestServer(t, c)
+
+	var byName AdminListResponse
+	resp := srv.doJSON("GET", "/workflows?sort_by=name&sort_dir=asc", nil, &byName)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	if len(byName.Items) < 2 {
+		t.Fatalf("items=%d", len(byName.Items))
+	}
+	if byName.Items[0].Name != "alpha" {
+		t.Fatalf("first name=%q want alpha", byName.Items[0].Name)
+	}
+
+	var byCreatedDesc AdminListResponse
+	resp = srv.doJSON("GET", "/workflows?sort_by=created&sort_dir=desc&limit=1", nil, &byCreatedDesc)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	if len(byCreatedDesc.Items) != 1 {
+		t.Fatalf("items=%d", len(byCreatedDesc.Items))
+	}
+	if byCreatedDesc.Items[0].ID != "sort-2" {
+		t.Fatalf("first id=%q want sort-2", byCreatedDesc.Items[0].ID)
+	}
+}
+
+func TestAdmin_ListWorkflows_InvalidSortQuery(t *testing.T) {
+	c := newTestContext(t)
+	_ = Launch(c)
+	srv := newAdminTestServer(t, c)
+
+	resp, _ := srv.do("GET", "/workflows?sort_by=unknown", nil)
+	if resp.StatusCode != 400 {
+		t.Fatalf("sort_by unknown status=%d want 400", resp.StatusCode)
+	}
+
+	resp, _ = srv.do("GET", "/workflows?sort_dir=sideways", nil)
+	if resp.StatusCode != 400 {
+		t.Fatalf("sort_dir invalid status=%d want 400", resp.StatusCode)
+	}
+}
+
 func TestAdmin_GetWorkflow_WithStepsAndDuration(t *testing.T) {
 	c := newTestContext(t)
 	wf := func(c *Context, _ string) (string, error) {

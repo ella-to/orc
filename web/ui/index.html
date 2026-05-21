@@ -244,6 +244,29 @@
         position: sticky;
         top: 0;
       }
+      .sort-btn {
+        border: 0;
+        padding: 0;
+        margin: 0;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        letter-spacing: inherit;
+        text-transform: inherit;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .sort-btn:hover {
+        color: var(--text);
+      }
+      .sort-btn .arrow {
+        font-size: 11px;
+        opacity: 0.8;
+      }
+      .sort-btn.active .arrow {
+        opacity: 1;
+      }
       table tr.row {
         cursor: pointer;
       }
@@ -883,12 +906,36 @@
             Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 100;
           const rawPage = parseInt(u.searchParams.get("page") || "1", 10);
           const page = Number.isFinite(rawPage) && rawPage > 0 ? rawPage : 1;
+          const allowedSortBy = [
+            "created",
+            "name",
+            "status",
+            "queue",
+            "attempts",
+            "duration",
+          ];
+          const rawSortBy = (u.searchParams.get("sort_by") || "created").toLowerCase();
+          const sortBy = allowedSortBy.includes(rawSortBy)
+            ? rawSortBy
+            : "created";
+          let sortDir = (u.searchParams.get("sort_dir") || "").toLowerCase();
+          if (!sortDir) {
+            const legacyDesc = u.searchParams.get("desc");
+            if (legacyDesc != null) {
+              sortDir = parseBool(legacyDesc, true) ? "desc" : "asc";
+            }
+          }
+          if (sortDir !== "asc" && sortDir !== "desc") {
+            sortDir = "desc";
+          }
           return {
             status: u.searchParams.getAll("status"),
             name: u.searchParams.get("name") || "",
             queue: u.searchParams.get("queue") || "",
             limit: String(limit),
             page,
+            sortBy,
+            sortDir,
           };
         }
         function setListFilter(name, value, multi) {
@@ -911,6 +958,18 @@
           history.replaceState(null, "", u.toString());
         }
 
+        function setListSort(sortBy) {
+          const f = listFilters();
+          const u = new URL(location.href);
+          const nextDir =
+            f.sortBy === sortBy && f.sortDir === "asc" ? "desc" : "asc";
+          u.searchParams.set("sort_by", sortBy);
+          u.searchParams.set("sort_dir", nextDir);
+          u.searchParams.delete("desc");
+          u.searchParams.delete("page");
+          history.replaceState(null, "", u.toString());
+        }
+
         function buildListQuery(f) {
           const p = new URLSearchParams();
           for (const s of f.status) p.append("status", s);
@@ -918,7 +977,8 @@
           if (f.queue) p.set("queue", f.queue);
           p.set("limit", f.limit || "100");
           p.set("page", String(f.page || 1));
-          p.set("desc", "1");
+          p.set("sort_by", f.sortBy || "created");
+          p.set("sort_dir", f.sortDir || "desc");
           p.set("load_io", "0");
           return p.toString();
         }
@@ -1022,22 +1082,34 @@
             class: "panel",
             style: { padding: "0", overflow: "auto" },
           });
+          const sortArrow = (key) => {
+            if (filters.sortBy !== key) return "↕";
+            return filters.sortDir === "asc" ? "↑" : "↓";
+          };
+          const sortClass = (key) =>
+            "sort-btn" + (filters.sortBy === key ? " active" : "");
           tableWrap.innerHTML = `
       <table>
         <thead><tr>
           <th>Workflow ID</th>
-          <th>Name</th>
-          <th>Status</th>
-          <th>Queue</th>
-          <th class="nowrap">Attempts</th>
-          <th class="nowrap" title="Wall-clock time the workflow ran. Frozen once the workflow reaches a terminal state.">Duration</th>
-          <th class="nowrap" title="How long ago the workflow was created.">Created</th>
+          <th><button class="${sortClass("name")}" type="button" data-sort-by="name">Name <span class="arrow">${sortArrow("name")}</span></button></th>
+          <th><button class="${sortClass("status")}" type="button" data-sort-by="status">Status <span class="arrow">${sortArrow("status")}</span></button></th>
+          <th><button class="${sortClass("queue")}" type="button" data-sort-by="queue">Queue <span class="arrow">${sortArrow("queue")}</span></button></th>
+          <th class="nowrap"><button class="${sortClass("attempts")}" type="button" data-sort-by="attempts">Attempts <span class="arrow">${sortArrow("attempts")}</span></button></th>
+          <th class="nowrap" title="Wall-clock time the workflow ran. Frozen once the workflow reaches a terminal state."><button class="${sortClass("duration")}" type="button" data-sort-by="duration">Duration <span class="arrow">${sortArrow("duration")}</span></button></th>
+          <th class="nowrap" title="How long ago the workflow was created."><button class="${sortClass("created")}" type="button" data-sort-by="created">Created <span class="arrow">${sortArrow("created")}</span></button></th>
           <th>Updated</th>
         </tr></thead>
         <tbody id="list-body"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
       </table>
     `;
           view.appendChild(tableWrap);
+          tableWrap.querySelectorAll("[data-sort-by]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+              setListSort(btn.getAttribute("data-sort-by"));
+              render();
+            });
+          });
 
           // Pagination panel
           const paginationPanel = el("div", {
@@ -2015,7 +2087,9 @@
           for (const s of steps) {
             const status = s.error ? "ERROR" : "SUCCESS";
             const tr = el("tr", { class: "steps-main-row" });
-            tr.appendChild(el("td", { class: "mono nowrap" }, String(s.step_id)));
+            tr.appendChild(
+              el("td", { class: "mono nowrap" }, String(s.step_id)),
+            );
             const nameTd = el("td", null, s.step_name || "—");
             if (s.child_workflow_id) {
               nameTd.appendChild(document.createTextNode(" "));
@@ -2046,7 +2120,9 @@
             const resultTr = el("tr", { class: "steps-result-row" });
             const resultTd = el("td", { colspan: "4" });
             if (s.error) {
-              resultTd.appendChild(renderStepResult(s.error, true, { fullWidth: true }));
+              resultTd.appendChild(
+                renderStepResult(s.error, true, { fullWidth: true }),
+              );
             } else if (s.output !== undefined && s.output !== null) {
               resultTd.appendChild(
                 renderStepResult(s.output, false, { fullWidth: true }),
@@ -2267,8 +2343,14 @@
 
           if (options.fullWidth) {
             const lineCount = summary.raw ? summary.raw.split("\n").length : 1;
-            const collapsedHeight = Math.max(120, Math.min(300, lineCount * 18 + 24));
-            codeBody.style.setProperty("--collapsed-max-height", collapsedHeight + "px");
+            const collapsedHeight = Math.max(
+              120,
+              Math.min(300, lineCount * 18 + 24),
+            );
+            codeBody.style.setProperty(
+              "--collapsed-max-height",
+              collapsedHeight + "px",
+            );
             codeBody.setAttribute("data-collapsed-max-height", "true");
 
             const isLarge = lineCount > 10 || summary.raw.length > 1400;
