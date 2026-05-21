@@ -250,6 +250,28 @@ func TestAdmin_GetWorkflow_WithStepsAndDuration(t *testing.T) {
 	}
 }
 
+func TestAdmin_ToView_TerminalDurationStopsWhenUpdatedEqualsStarted(t *testing.T) {
+	started := time.Date(2026, 5, 21, 2, 25, 9, 201000000, time.UTC)
+	v := toView(&WorkflowStatus{
+		ID:        "wf-1",
+		Name:      "demo",
+		Status:    WorkflowStatusSuccess,
+		CreatedAt: started,
+		StartedAt: started,
+		UpdatedAt: started,
+	}, started.Add(25*time.Minute+47*time.Second))
+
+	if v.DurationMs != 0 {
+		t.Fatalf("duration_ms=%d, want 0", v.DurationMs)
+	}
+	if v.DurationHuman != "0s" {
+		t.Fatalf("duration_human=%q, want 0s", v.DurationHuman)
+	}
+	if v.AgeMs <= 0 {
+		t.Fatalf("age_ms=%d, want > 0", v.AgeMs)
+	}
+}
+
 func TestAdmin_GetWorkflow_NotFound(t *testing.T) {
 	c := newTestContext(t)
 	_ = Launch(c)

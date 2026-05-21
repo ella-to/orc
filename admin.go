@@ -963,7 +963,7 @@ func toView(st *WorkflowStatus, now time.Time) AdminWorkflowView {
 	var dur time.Duration
 	if !st.StartedAt.IsZero() {
 		end := now
-		if st.Status.IsTerminal() && !st.UpdatedAt.IsZero() && st.UpdatedAt.After(st.StartedAt) {
+		if st.Status.IsTerminal() && !st.UpdatedAt.IsZero() {
 			end = st.UpdatedAt
 		}
 		if end.After(st.StartedAt) {
