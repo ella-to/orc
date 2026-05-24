@@ -312,16 +312,16 @@ func listWorkflowsWhere(in listWorkflowsInput) (string, []any) {
 		}
 	}
 	if in.WorkflowName != "" {
-		conds = append(conds, "name = ?")
-		args = append(args, in.WorkflowName)
+		conds = append(conds, "name LIKE ?")
+		args = append(args, "%"+in.WorkflowName+"%")
 	}
 	if in.QueueName != "" {
-		conds = append(conds, "queue_name = ?")
-		args = append(args, in.QueueName)
+		conds = append(conds, "queue_name LIKE ?")
+		args = append(args, "%"+in.QueueName+"%")
 	}
 	if in.ExecutorID != "" {
-		conds = append(conds, "executor_id = ?")
-		args = append(args, in.ExecutorID)
+		conds = append(conds, "executor_id LIKE ?")
+		args = append(args, "%"+in.ExecutorID+"%")
 	}
 	if !in.StartTime.IsZero() {
 		conds = append(conds, "created_at >= ?")

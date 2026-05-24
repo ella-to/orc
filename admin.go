@@ -325,7 +325,7 @@ func (a *adminAPI) handleIndex(w http.ResponseWriter, r *http.Request) {
 	routes := []route{
 		{"GET", "/health", "liveness probe"},
 		{"GET", "/info", "executor info, registered workflows, queue summaries, status counts"},
-		{"GET", "/workflows", "list workflows (filters: status, name, queue, executor, id, start, end; pagination: limit, offset, page; sort: sort_by + sort_dir, legacy desc; payload: load_io). Response includes page, page_size and total."},
+		{"GET", "/workflows", "list workflows (filters: status, name, queue, executor, id, start, end — name/queue/executor use substring/fuzzy matching; pagination: limit, offset, page; sort: sort_by + sort_dir, legacy desc; payload: load_io). Response includes page, page_size and total."},
 		{"GET", "/workflows/{id}", "workflow detail (status + duration + steps + direct children)"},
 		{"DELETE", "/workflows/{id}", "delete a single workflow and dependent rows"},
 		{"GET", "/workflows/{id}/steps", "list checkpointed steps"},
