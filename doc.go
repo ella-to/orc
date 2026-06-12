@@ -40,8 +40,10 @@
 //
 // # Differences from dbos-transact-golang
 //
-//   - Uses SQLite (via ella.to/sqlite) instead of PostgreSQL. Notifications
-//     and queues are polling-driven instead of LISTEN/NOTIFY-driven.
+//   - Uses SQLite (via ella.to/sqlite) instead of PostgreSQL. Cross-process
+//     notifications and queues are polling-driven instead of
+//     LISTEN/NOTIFY-driven; within one process an internal notify hub wakes
+//     waiters immediately.
 //   - Drops Postgres-specific features (advisory locks, schemas, SKIP LOCKED).
 //   - No admin HTTP server, no Conductor cloud client, no streams, no patching.
 //   - Single-writer SQLite means concurrent enqueue/dequeue is serialised at

@@ -21,6 +21,7 @@ self-contained: just `cd` into one and `go run .`.
 | 13 | [`13-status-polling`](./13-status-polling)                          | A long-running workflow whose status is polled by a watcher goroutine.                     |
 | 14 | [`14-admin-http`](./14-admin-http)                                  | Mount `orc.AdminHandler` in `net/http` for live monitoring, cancel, resume, fork & tree.   |
 | 15 | [`15-http-context-cancel`](./15-http-context-cancel)                | `WithCallerContext` ties a workflow's lifetime to an HTTP request; cancel = CANCELLED.     |
+| 16 | [`16-delayed-run`](./16-delayed-run)                                | `WithWorkflowDelay` schedules a one-shot run N seconds out; the delay survives restarts.   |
 
 ## Running
 
@@ -47,7 +48,9 @@ If you're new to orc, work through them roughly in order:
 6. **06-saga-compensation** — error-handling patterns.
 7. **08-rate-limited-queue**, **12-priority-queue** — queue tuning.
 8. **07-cron-scheduler**, **09-cancel-workflow**, **10-events-monitor**,
-   **11-idempotent-run** — assorted features.
+   **11-idempotent-run**, **16-delayed-run** — assorted features.
+9. **14-admin-http**, **15-http-context-cancel** — wiring orc into an HTTP
+   server (admin API + dashboard, request-scoped workflows).
 
 ## What you'll always see
 

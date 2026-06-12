@@ -30,12 +30,15 @@ in-flight workflows from their last checkpoint when it next launches.
 
 - **Durable workflows** — registered Go functions whose execution state survives crashes.
 - **Durable steps** — `RunAsStep` records each step's output so re-execution skips work that's already done.
+- **Durable child workflows** — `RunWorkflow` called *inside* a workflow is checkpointed too: a replayed parent re-attaches to the same children instead of spawning duplicates.
 - **Durable queues** — concurrency limits, rate limits, priorities, deduplication.
+- **Durable delays** — `WithWorkflowDelay` schedules a one-shot run in the future; the delay survives restarts.
 - **Inter-workflow messaging** — `Send` / `Recv` with topics.
 - **Workflow events** — `SetEvent` / `GetEvent` to expose progress to the outside world.
 - **Durable sleep** — `Sleep` survives restarts.
 - **Cron scheduling** — `WithSchedule("* * * * * *")` registers a cron-driven workflow.
 - **Recovery** — interrupted workflows automatically resume on `Launch`.
+- **Low latency in-process** — same-process `Send`→`Recv`, `SetEvent`→`GetEvent`, enqueue→dispatch and completion→`GetResult` are signal-driven (near-instant); the configured poll intervals only matter as the cross-process fallback.
 - **Caller-scoped cancellation** — opt in to `WithCallerContext(r.Context())` to tie a workflow's lifetime to an HTTP request (or any `context.Context`); the workflow stops when the caller disconnects and `GetResult` returns `context.Canceled`.
 - **Management APIs** — `ListWorkflows`, `CancelWorkflow`, `ResumeWorkflow`, `ForkWorkflow`, `DeleteWorkflows`, `GCWorkflows`.
 - **Admin HTTP handler** — `orc.AdminHandler(ctx)` returns a `http.Handler` you can mount under any prefix in your own `net/http` mux for live monitoring, cancel/resume/fork, parent/child tree inspection, and per-workflow durations.
@@ -139,6 +142,14 @@ orc.Config{
 Environment variables `DBOS__APPVERSION` and `DBOS__VMID` are read for
 `ApplicationVersion` / `ExecutorID` when those fields are empty.
 
+> **Note on poll intervals.** Within a single process, orc is signal-driven:
+> a `Send`, `SetEvent`, enqueue or workflow completion wakes its local waiters
+> immediately. `QueuePollInterval` and `NotificationPollInterval` are the
+> *fallback* cadence, which is what bounds latency when the producer lives in
+> a **different process** sharing the same database file. If you run one
+> process per DB (the recommended shape), the defaults are nearly free —
+> idle queue polls are read-only and skip SQLite's writer lock entirely.
+
 ---
 
 ## Workflows
@@ -158,6 +169,12 @@ orc.RegisterWorkflow[MyInput, MyOutput](ctx, myWorkflow,
 )
 ```
 
+Registration validates the function's signature up front: a function that
+isn't `func(*orc.Context, I) (O, error)` (or the no-input variant
+`func(*orc.Context) (O, error)`), or whose types don't match the generic
+parameters, panics immediately with a message explaining what was expected —
+rather than failing on its first execution.
+
 You start it with:
 
 ```go
@@ -176,6 +193,36 @@ out, err := h.GetResult(orc.WithHandleTimeout(time.Minute))
 If you call `RunWorkflow` twice with the **same `WorkflowID` and same input**,
 you get a handle to the **existing** run instead of starting a new one — that's
 the durable-idempotent contract.
+
+`WithWorkflowDelay(d)` records the run as `DELAYED` and dispatches it once
+`d` has elapsed — durably, so the pending delay survives a restart. It works
+with or without `WithQueue` (without one, the run is routed through orc's
+internal queue and you get a polling handle).
+
+### Child workflows
+
+Calling `RunWorkflow` *from inside* another workflow spawns a durable child —
+and the spawn itself is checkpointed as a step in the parent:
+
+```go
+func parent(c *orc.Context, n int) (int, error) {
+    h, err := orc.RunWorkflow[int, int](c, childWf, n) // no explicit ID needed
+    if err != nil { return 0, err }
+    return h.GetResult(orc.WithHandleTimeout(time.Minute))
+}
+```
+
+- Without `WithWorkflowID`, the child's ID is derived deterministically from
+  `(parent ID, step number)`.
+- The child's ID is recorded in the parent's step log
+  (`operation_outputs.child_workflow_id`), so if the parent crashes and is
+  replayed it **re-attaches to the same child** instead of spawning a
+  duplicate.
+- Children appear in the admin API/dashboard under the parent's
+  `/children` and `/tree` views.
+
+As with steps, the usual determinism rule applies: spawn children in the
+same order on every replay.
 
 ### Steps
 
@@ -232,6 +279,10 @@ msg, err := orc.Recv[string](c, "topic-x", 30*time.Second)
 `Send` and `Recv` are durable when invoked inside a workflow — they record their
 operation as a step so a re-execution doesn't double-send / double-receive.
 
+On timeout, `Recv` returns T's zero value with a **nil error** — use a pointer
+or wrapper type for T if you need to distinguish "timed out" from a legitimate
+zero-value message.
+
 ### Events
 
 ```go
@@ -267,6 +318,8 @@ ws, _ := orc.ListWorkflows(ctx,
     orc.WithListWorkflowStatus(orc.WorkflowStatusError),
     orc.WithListWorkflowLimit(50),
 )
+// Programmatic name/queue/executor filters match EXACTLY. (The admin HTTP
+// API's equivalents use substring matching, for interactive search.)
 
 _ = orc.CancelWorkflow(ctx, "wf-123")
 h, _ := orc.ResumeWorkflow[string](ctx, "wf-123")
@@ -761,10 +814,10 @@ All parameters are optional and may be combined.
 
 | Param      | Type / format                                | Description                                                                          |
 | ---------- | -------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `name`     | string                                       | Match by registered workflow name.                                                   |
+| `name`     | string                                       | Substring (fuzzy) match on workflow name.                                            |
 | `status`   | repeatable enum                              | One of `PENDING`, `ENQUEUED`, `DELAYED`, `SUCCESS`, `ERROR`, `CANCELLED`, `MAX_RECOVERY_ATTEMPTS_EXCEEDED`. Repeat to OR-filter. |
-| `queue`    | string                                       | Filter by queue name.                                                                |
-| `executor` | string                                       | Filter by executor id.                                                               |
+| `queue`    | string                                       | Substring (fuzzy) match on queue name.                                               |
+| `executor` | string                                       | Substring (fuzzy) match on executor id.                                              |
 | `id`       | repeatable string                            | Return only workflows whose id is in this set. Repeat for multiple ids.              |
 | `start`    | RFC3339 timestamp                            | Filter by `created_at >= start`.                                                     |
 | `end`      | RFC3339 timestamp                            | Filter by `created_at <= end`.                                                       |
@@ -1041,6 +1094,7 @@ Open <http://localhost:8080/ui/> in a browser.
    finds the recorded output.
 3. **Pick stable workflow IDs** for anything you might want to retry, query,
    or cancel from the outside. `WithWorkflowID(orderID)` is a great pattern.
+   (Child workflows get deterministic replay-safe IDs automatically.)
 4. **Don't share mutable state between workflow invocations.** Treat your
    workflow function as a deterministic re-runnable function over its inputs
    and the recorded step outputs.

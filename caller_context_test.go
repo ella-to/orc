@@ -228,7 +228,7 @@ func TestWithCallerContext_HTTPHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var handlerErr atomic.Value // error
+	var handlerErr atomic.Value  // error
 	var handlerWFID atomic.Value // string
 	handlerDone := make(chan struct{})
 

@@ -95,6 +95,8 @@ func CancelWorkflow(c *Context, workflowID string) error {
 			aw.cancel(ErrWorkflowCancelledErr)
 		}
 	}
+	// CANCELLED is terminal: wake any in-process GetResult waiters.
+	c.core.hub.signal(workflowDoneKey(workflowID))
 	return nil
 }
 
@@ -106,6 +108,7 @@ func ResumeWorkflow[O any](c *Context, workflowID string, _ ...ResumeWorkflowOpt
 	if err := c.systemDB.resumeWorkflow(c.ctx, workflowID); err != nil {
 		return nil, err
 	}
+	c.core.wakeQueue()
 	return &pollingHandle[O]{id: workflowID, ctx: c}, nil
 }
 
@@ -127,6 +130,7 @@ func ForkWorkflow[O any](c *Context, in ForkWorkflowInput) (WorkflowHandle[O], e
 	if err != nil {
 		return nil, err
 	}
+	c.core.wakeQueue()
 	return &pollingHandle[O]{id: id, ctx: c}, nil
 }
 

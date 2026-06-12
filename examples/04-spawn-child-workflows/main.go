@@ -6,6 +6,12 @@
 //   - Each child has its own durable lifecycle and can be inspected,
 //     cancelled, or recovered independently
 //
+// Spawning a child from inside a workflow is itself checkpointed as a step:
+// the child's ID is recorded in the parent's step log, so if the parent is
+// re-executed after a crash it re-attaches to the same children instead of
+// spawning duplicates. Without an explicit WithWorkflowID the child ID is
+// derived deterministically from (parent ID, step number).
+//
 // Pattern: think of the parent as a "coordinator" and each child as a
 // long-running unit of work.
 //
@@ -52,9 +58,9 @@ func parent(c *orc.Context, n int) ([]string, error) {
 
 	handles := make([]orc.WorkflowHandle[childOutput], n)
 	for i := 0; i < n; i++ {
-		// Each child gets a deterministic ID — re-running the parent with
-		// the same input would resume the same children rather than
-		// spawning fresh ones.
+		// An explicit ID is optional — child spawns are checkpointed, so a
+		// replayed parent re-attaches to the same children either way. A
+		// human-readable ID is still nice for dashboards and sqlite3 digging.
 		childID := fmt.Sprintf("child-%d", i)
 		h, err := orc.RunWorkflow[childInput, childOutput](c, child,
 			childInput{Index: i, Payload: fmt.Sprintf("payload-%d", i)},

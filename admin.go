@@ -377,15 +377,14 @@ func (a *adminAPI) handleInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	counts := make(map[string]int, len(statuses))
 	for _, s := range statuses {
-		ws, err := c.systemDB.listWorkflows(c.ctx, listWorkflowsInput{
+		n, err := c.systemDB.countWorkflows(c.ctx, listWorkflowsInput{
 			Status: []WorkflowStatusType{s},
-			Limit:  a.opts.MaxScanLimit,
 		})
 		if err != nil {
 			a.writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		counts[string(s)] = len(ws)
+		counts[string(s)] = n
 	}
 
 	a.writeJSON(w, http.StatusOK, AdminInfo{
@@ -480,6 +479,8 @@ func (a *adminAPI) parseListInput(r *http.Request) (listWorkflowsInput, error) {
 		WorkflowIDs:     q["id"],
 		SortBy:          listWorkflowSortCreated,
 		SortDescending:  parseBool(q.Get("desc"), false),
+		// Interactive search: substring matching for name/queue/executor.
+		Fuzzy: true,
 	}
 	if v := strings.TrimSpace(strings.ToLower(q.Get("sort_by"))); v != "" {
 		switch v {

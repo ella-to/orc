@@ -96,6 +96,10 @@ func (r *queueRunner) run() {
 			return
 		case <-t.C:
 			r.tick()
+		case <-r.c.core.queueWake:
+			// Something was enqueued in this process: dispatch immediately
+			// instead of waiting out the poll interval.
+			r.tick()
 		case <-pj.C:
 			r.purgeDispatchLog()
 		}
@@ -180,13 +184,13 @@ func (r *queueRunner) dispatchOne(q *WorkflowQueue) {
 		}
 	}
 	if q.GlobalConcurrency > 0 {
-		var active int
-		ws, _ := r.c.systemDB.listWorkflows(ctx, listWorkflowsInput{
+		active, err := r.c.systemDB.countWorkflows(ctx, listWorkflowsInput{
 			QueueName: q.Name,
 			Status:    []WorkflowStatusType{WorkflowStatusPending},
-			Limit:     1000,
 		})
-		active = len(ws)
+		if err != nil {
+			return
+		}
 		remaining := q.GlobalConcurrency - active
 		if remaining < limit {
 			limit = remaining

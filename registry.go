@@ -27,13 +27,13 @@ func newRegistry() *registry {
 // encoded output (or an error). This indirection lets us register strongly
 // typed Go functions while persisting/recovering them through the DB layer.
 type registryEntry struct {
-	Name              string
-	CronSchedule      string
-	MaxRetries        int
-	Wrapper           func(ctx *Context, encodedInput string) (encodedOutput string, runtimeErr error)
-	InputType         reflect.Type
-	OutputType        reflect.Type
-	IsScheduled       bool
+	Name         string
+	CronSchedule string
+	MaxRetries   int
+	Wrapper      func(ctx *Context, encodedInput string) (encodedOutput string, runtimeErr error)
+	InputType    reflect.Type
+	OutputType   reflect.Type
+	IsScheduled  bool
 }
 
 // fqn returns the fully qualified name of a function value, e.g.
@@ -146,61 +146,59 @@ func RegisterWorkflow[I any, O any](c *Context, fn any, opts ...RegisterWorkflow
 }
 
 // buildRegistryEntry constructs the wrapper closure for a typed workflow
-// function.
+// function. The function's shape is validated here, at registration time, so
+// a mis-registered workflow fails fast with a clear message instead of
+// erroring on its first execution.
 func buildRegistryEntry[I any, O any](name string, fn any, opt *registerWorkflowOptions) *registryEntry {
 	rt := reflect.TypeOf(fn)
-	if rt.Kind() != reflect.Func {
-		panic(fmt.Sprintf("orc: workflow %q is not a function", name))
+	if rt == nil || rt.Kind() != reflect.Func {
+		panic(fmt.Sprintf("orc: workflow %q is not a function (got %T)", name, fn))
+	}
+	validateWorkflowSignature[I, O](name, rt)
+
+	// Fast path: the overwhelmingly common signatures are invoked directly,
+	// avoiding reflect.Call on every workflow execution. Anything else (e.g.
+	// interface-typed parameters) falls back to reflection.
+	var invoke func(c *Context, in I) (any, error)
+	switch f := fn.(type) {
+	case func(*Context, I) (O, error):
+		invoke = func(c *Context, in I) (any, error) { return f(c, in) }
+	case func(*Context) (O, error):
+		invoke = func(c *Context, _ I) (any, error) { return f(c) }
+	default:
+		fv := reflect.ValueOf(fn)
+		takesInput := rt.NumIn() == 2
+		invoke = func(c *Context, in I) (any, error) {
+			args := []reflect.Value{reflect.ValueOf(c)}
+			if takesInput {
+				args = append(args, reflect.ValueOf(in))
+			}
+			out := fv.Call(args)
+			var runErr error
+			if !out[1].IsNil() {
+				runErr = out[1].Interface().(error)
+			}
+			return out[0].Interface(), runErr
+		}
 	}
 
 	wrapper := func(c *Context, encodedInput string) (string, error) {
-		// Decode input.
 		var in I
 		if encodedInput != "" {
 			if _, err := c.cfg.Serializer.Decode(encodedInput, &in); err != nil {
 				return "", err
 			}
 		}
-
-		// Reflectively invoke the registered function with whatever its
-		// signature happens to be: 1 or 2 args.
-		fv := reflect.ValueOf(fn)
-		ft := fv.Type()
-		args := []reflect.Value{reflect.ValueOf(c)}
-		if ft.NumIn() == 2 {
-			args = append(args, reflect.ValueOf(in))
-		}
-		out := fv.Call(args)
-
-		// Expect (O, error).
-		if len(out) != 2 {
-			return "", newError(ErrUnknown, "workflow %s returned %d values, want 2", name, len(out))
-		}
-		var runErr error
-		if !out[1].IsNil() {
-			runErr = out[1].Interface().(error)
-		}
-		var result any
-		if out[0].IsValid() {
-			result = out[0].Interface()
-		}
+		result, runErr := invoke(c, in)
 		if runErr != nil {
 			return "", runErr
 		}
-		enc, err := c.cfg.Serializer.Encode(result)
-		if err != nil {
-			return "", err
-		}
-		return enc, nil
+		return c.cfg.Serializer.Encode(result)
 	}
 
 	var inT reflect.Type
 	if rt.NumIn() == 2 {
 		inT = rt.In(1)
-	}
-	var outT reflect.Type
-	if rt.NumOut() >= 1 {
-		outT = rt.Out(0)
 	}
 
 	return &registryEntry{
@@ -208,7 +206,38 @@ func buildRegistryEntry[I any, O any](name string, fn any, opt *registerWorkflow
 		Wrapper:    wrapper,
 		MaxRetries: opt.maxRetries,
 		InputType:  inT,
-		OutputType: outT,
+		OutputType: rt.Out(0),
+	}
+}
+
+// validateWorkflowSignature panics with an actionable message unless fn looks
+// like func(*Context, I) (O, error) or func(*Context) (O, error), with I/O
+// compatible with the generic type parameters used at registration.
+func validateWorkflowSignature[I any, O any](name string, rt reflect.Type) {
+	fail := func(why string) {
+		panic(fmt.Sprintf(
+			"orc: cannot register workflow %q: %s — want func(*orc.Context, %v) (%v, error) or func(*orc.Context) (%v, error), got %v",
+			name, why, reflect.TypeFor[I](), reflect.TypeFor[O](), reflect.TypeFor[O](), rt))
+	}
+	if rt.NumIn() < 1 || rt.NumIn() > 2 {
+		fail("wrong number of parameters")
+	}
+	if rt.In(0) != reflect.TypeFor[*Context]() {
+		fail("first parameter must be *orc.Context")
+	}
+	if rt.NumOut() != 2 {
+		fail("must return exactly (output, error)")
+	}
+	if rt.Out(1) != reflect.TypeFor[error]() {
+		fail("second return value must be error")
+	}
+	if rt.NumIn() == 2 {
+		if inT := reflect.TypeFor[I](); !inT.AssignableTo(rt.In(1)) {
+			fail(fmt.Sprintf("input type parameter %v is not assignable to the function's %v", inT, rt.In(1)))
+		}
+	}
+	if outT := reflect.TypeFor[O](); !rt.Out(0).AssignableTo(outT) && !outT.AssignableTo(rt.Out(0)) {
+		fail(fmt.Sprintf("output type parameter %v does not match the function's %v", outT, rt.Out(0)))
 	}
 }
 
@@ -228,4 +257,3 @@ func withWFState(c *Context, parent context.Context, st *withinWorkflowState) *C
 	clone.ctx = ctx
 	return clone
 }
-

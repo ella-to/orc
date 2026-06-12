@@ -117,6 +117,31 @@ This dual indexing means a refactor that moves the function to a different
 package keeps recovery working, *as long as* you registered with a stable
 name override. This is the recommended practice.
 
+Registration validates the function signature (parameter/return shape and
+compatibility with the generic type parameters) and panics with an
+actionable message on mismatch — failing at `RegisterWorkflow` rather than
+on first execution. The common signatures are invoked through a typed fast
+path; `reflect.Call` is only used for unusual-but-compatible shapes (e.g.
+interface-typed parameters).
+
+#### Child workflows
+
+`RunWorkflow` called from inside a workflow spawns a *child* workflow, and
+the spawn itself is checkpointed as a step in the parent:
+
+1. The call consumes a step ID from the parent's counter.
+2. If `operation_outputs` already has a row for that step (replay), the
+   recorded `child_workflow_id` is returned as a polling handle — no new
+   child is created.
+3. Otherwise the child row is inserted (ID defaults to
+   `<parentID>-<stepID>`, deterministic) and the spawn is recorded in
+   `operation_outputs` with `child_workflow_id` set, *before* execution
+   starts. A crash between insert and record converges on replay because
+   the deterministic ID makes the re-insert an idempotent attach.
+
+This means a recovered parent re-attaches to its children rather than
+spawning duplicates, with or without an explicit `WithWorkflowID`.
+
 ### 3.3 Steps
 
 ```go
@@ -206,6 +231,18 @@ The queue runner (`queue.go:queueRunner.run`) ticks at
 rate limit → worker (per-process) concurrency → global concurrency, then
 calls `systemDatabase.dequeueWorkflows` for the resulting batch size.
 
+Two latency/throughput refinements:
+
+- **Queue wake.** Enqueuing in-process (`RunWorkflow` with `WithQueue`,
+  `ResumeWorkflow`, `ForkWorkflow`, a cron tick) nudges the runner via a
+  buffered wake channel, so dispatch doesn't wait out the poll interval.
+  The interval tick remains the fallback for rows enqueued by *other*
+  processes.
+- **Idle pre-check.** `dequeueWorkflows` first runs a read-only
+  `SELECT EXISTS(...)`; only when there is something to claim does it open
+  the write transaction. Idle polling therefore never touches SQLite's
+  writer lock.
+
 ### 3.6 Notifications
 
 ```go
@@ -247,6 +284,17 @@ Implementation:
 Notifications are *messages* (one delivery per row, consumed). Events are
 *facts* (last write wins, anyone can read). They're separate primitives.
 
+#### In-process notify hub
+
+`notify.go` implements a small subscribe/signal hub (`contextCore.hub`).
+`Send`, `SetEvent` and workflow finalization signal the hub after their DB
+write commits; `Recv`, `GetEvent` and `GetResult` subscribe *before* their
+first DB poll (subscribe → poll → wait, so a signal can't be lost) and then
+select on {hub wake, poll interval, ctx done}. The result: same-process
+producer→consumer latency is effectively zero, while the DB poll remains
+the source of truth and the only mechanism needed for cross-process
+delivery. Missing a hub signal is never a correctness problem.
+
 ### 3.8 Sleep
 
 ```go
@@ -282,7 +330,9 @@ boundary across the cluster. The scheduler is shut down gracefully on
 `management.go` exposes:
 
 - `ListWorkflows(c, ...options)` — filter by name, status, queue,
-  executor, time range, IDs; paginate; load-or-skip I/O blobs.
+  executor, time range, IDs; paginate; load-or-skip I/O blobs. Text
+  filters match exactly; only the admin HTTP layer opts in to substring
+  (fuzzy) matching via `listWorkflowsInput.Fuzzy`.
 - `RetrieveWorkflow[O](c, id)` — return a polling handle.
 - `CancelWorkflow(c, id)` — mark `CANCELLED` in DB **and** cancel the
   per-workflow `context.Context` with cause `ErrWorkflowCancelled` so
@@ -671,6 +721,7 @@ it runs.
 | Step closure returns error, `WithStepMaxRetries` exhausted | Final error recorded in `operation_outputs.error`. `RunAsStep` returns it. Workflow can catch it.   |
 | Workflow function returns non-nil error             | `finalizeWorkflow` sets status `ERROR` (or `CANCELLED` if the underlying error is one of the cancellation sentinels). |
 | Workflow function panics                            | `recover()` in `runWorkflowExecution` finalises the row to ERROR and posts an `orc: workflow panic` outcome. |
+| Step succeeded but its checkpoint write failed      | `RunAsStep` returns an error (the workflow run fails and can be recovered/resumed) rather than continuing past an unpersisted checkpoint, which would re-execute the step on replay. |
 | Process crash mid-step                              | Step row is *not* present in `operation_outputs`. Recovery re-runs the workflow; the step closure is invoked again. |
 | Process crash after step recorded but before workflow finalised | Step row is present. Recovery re-runs the workflow; that step is skipped via the recorded output. |
 | `CancelWorkflow` while running                      | DB row flipped to CANCELLED. The per-workflow `context.Context` is cancelled with cause `ErrWorkflowCancelledErr`; steps that honour `ctx.Done()` (`Sleep`, `Recv`, etc.) return promptly. Cross-process cancellation is delivered by the cancel poller within `Config.CancelPollInterval` (default 250 ms). |
@@ -687,9 +738,10 @@ These are real, intentional gaps. Each is fixable but not yet fixed.
 1. **Single-writer storage.** SQLite serialises writes. Multiple
    processes on the same DB file are supported, but throughput is
    bounded by the writer.
-2. **Polling, not LISTEN/NOTIFY.** Floor latency for `Recv`/`GetEvent`/
-   queue dispatch is `*PollInterval` (default 50 ms). Tunable, but never
-   sub-millisecond.
+2. **Polling across processes.** Within one process, waiters are woken by
+   the in-process notify hub (near-zero latency). Between processes
+   sharing a DB file, floor latency for `Recv`/`GetEvent`/queue dispatch
+   is `*PollInterval` (default 50 ms). Tunable, but never sub-millisecond.
 3. **No streams / no patching system.** dbos has both; `orc` does not.
    Streams are a deliberate omission for the SQLite-only scope.
 4. **Inputs compared by encoded form.** Changing the configured
@@ -702,6 +754,23 @@ These are real, intentional gaps. Each is fixable but not yet fixed.
    et al. if needed.
 
 ### Resolved (was previously listed here)
+
+- **Child workflow replay duplication.** `RunWorkflow` inside a workflow
+  is now checkpointed as a step (`operation_outputs.child_workflow_id`)
+  with a deterministic default child ID, so recovered parents re-attach
+  to existing children. See §3.2 "Child workflows".
+- **`WithWorkflowDelay` without a queue.** Previously silently ignored
+  (the row was inserted DELAYED but executed immediately). Direct delayed
+  runs are now routed through the internal queue so the delay is durable.
+- **Fuzzy filters leaking into internal queries.** The admin API's
+  substring search on name/queue/executor briefly applied to *all*
+  `listWorkflows` callers, which let executor `node-1` recover workflows
+  owned by `node-10`. Substring matching is now opt-in
+  (`listWorkflowsInput.Fuzzy`), set only by the admin HTTP layer.
+- **Unrecorded step checkpoints.** A failed `recordStepOutput` after a
+  successful step now fails the workflow run (so it retries from a
+  consistent state) instead of letting execution continue past an
+  unpersisted checkpoint.
 
 - **Cancellation is now proactive.** `CancelWorkflow` cancels the
   per-workflow `context.Context` with cause `ErrWorkflowCancelled` for
@@ -762,9 +831,12 @@ just smaller.
   fan-out (e.g. dashboards calling `ListWorkflows` constantly) and CPUs
   to spare. The writer is still serialised.
 - `Config.QueuePollInterval` (default 50 ms): trades latency for SQL
-  load. At 50 ms with N queues you do at most 20·N cheap SELECTs / sec.
+  load. At 50 ms with N queues you do at most 20·N cheap read-only
+  SELECTs / sec — idle ticks never take the writer lock, and in-process
+  enqueues bypass the interval entirely via the queue wake channel.
 - `Config.NotificationPollInterval` (default 50 ms): floor for
-  `Recv` / `GetEvent` / inside-`Sleep` wakeups.
+  `Recv` / `GetEvent` / inside-`Sleep` wakeups **from other processes**;
+  same-process producers wake waiters immediately through the notify hub.
 - `Config.CancelPollInterval` (default 250 ms): how often the cancel
   poller scans for workflows that another process marked CANCELLED so
   it can interrupt the local goroutine. In single-executor setups this
@@ -814,6 +886,7 @@ in deployment).
 | `workflow.go`              | `RunWorkflow`, `RunAsStep`, `runRegisteredWorkflowFromDB`, finalisation.|
 | `handle.go`                | `WorkflowHandle`, `directHandle`, `pollingHandle`, polling logic.       |
 | `queue.go`                 | `WorkflowQueue`, `NewWorkflowQueue`, `queueRunner`, dispatch loop, `queue_dispatch_log` janitor. |
+| `notify.go`                | In-process notify hub: subscribe/signal used by Recv/GetEvent/GetResult waits and the queue wake. |
 | `cancel_poller.go`         | Cross-process cancel poller that cancels local workers when their DB row is flipped to CANCELLED elsewhere. |
 | `notifications.go`         | `Send`, `Recv` and their step-wrapping logic.                           |
 | `events.go`                | `SetEvent`, `GetEvent` and their step-wrapping logic.                   |

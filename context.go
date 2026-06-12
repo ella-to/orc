@@ -45,6 +45,22 @@ type contextCore struct {
 	cancelPoller  *cancelPoller
 	cancelDone    chan struct{}
 	cancelStarted atomic.Bool
+	// hub wakes in-process waiters (Recv, GetEvent, GetResult) immediately
+	// instead of after a poll interval. Purely a latency optimization; the
+	// DB poll remains the source of truth.
+	hub *notifyHub
+	// queueWake nudges the queue runner to tick right away when something
+	// was just enqueued in this process.
+	queueWake chan struct{}
+}
+
+// wakeQueue nudges the queue runner without blocking. A single pending wake
+// is enough: one tick scans every queue.
+func (cc *contextCore) wakeQueue() {
+	select {
+	case cc.queueWake <- struct{}{}:
+	default:
+	}
 }
 
 // activeWorkflow tracks a workflow currently executing in this process. The
@@ -108,7 +124,7 @@ func NewContext(parent context.Context, cfg Config) (*Context, error) {
 	}
 	cfg.applyDefaults()
 
-	core := &contextCore{}
+	core := &contextCore{hub: newNotifyHub(), queueWake: make(chan struct{}, 1)}
 	c := &Context{cfg: &cfg, logger: cfg.Logger, registry: newRegistry(), core: core}
 	ctx, cancel := context.WithCancelCause(parent)
 	core.cancel = cancel

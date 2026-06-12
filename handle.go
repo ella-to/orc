@@ -1,7 +1,7 @@
 package orc
 
 import (
-	"errors"
+	"context"
 	"reflect"
 	"time"
 )
@@ -72,7 +72,10 @@ func (h *directHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
 	select {
 	case res, ok := <-h.result:
 		if !ok {
-			return zero[R](), wrapError(ErrUnknown, errors.New("result channel closed"), "GetResult")
+			// The buffered result was already consumed by an earlier
+			// GetResult call. The workflow is finalized by now, so serve
+			// repeat calls from the database.
+			return pollHandleResult[R](h.ctx, h.id, o)
 		}
 		return castOutcome[R](res, h.ctx)
 	case <-deadline:
@@ -122,36 +125,75 @@ func pollHandleResult[R any](c *Context, id string, o *getResultOptions) (R, err
 	if interval <= 0 {
 		interval = 50 * time.Millisecond
 	}
+
+	// Wake immediately when this process finalizes (or cancels) the workflow,
+	// instead of paying up to a full poll interval. Cross-process completion
+	// is still observed via the interval poll.
+	doneKey := workflowDoneKey(id)
+	wake := c.core.hub.subscribe(doneKey)
+	defer c.core.hub.unsubscribe(doneKey, wake)
+
 	for {
 		st, err := c.systemDB.getWorkflowStatus(c.ctx, id, true)
 		if err != nil {
+			if c.ctx.Err() != nil {
+				return finalStatusRead[R](c, id)
+			}
 			return zero[R](), err
 		}
 		if st == nil {
 			return zero[R](), ErrWorkflowNotFoundErr
 		}
-		switch st.Status {
-		case WorkflowStatusSuccess:
-			return castOutput[R](st.Output, c)
-		case WorkflowStatusError:
-			if st.Error != nil {
-				return zero[R](), wrapError(ErrAwaitedWorkflowFailed, st.Error, "workflow %s failed", id)
-			}
-			return zero[R](), ErrAwaitedWorkflowFailedErr
-		case WorkflowStatusCancelled:
-			return zero[R](), ErrWorkflowCancelledErr
-		case WorkflowStatusMaxRecoveryAttemptsExceeded:
-			return zero[R](), ErrMaxAttemptsErr
+		if out, err, terminal := terminalOutcome[R](c, id, st); terminal {
+			return out, err
 		}
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			return zero[R](), ErrWorkflowAwaitTimeoutErr
 		}
 		select {
 		case <-c.ctx.Done():
-			return zero[R](), c.ctx.Err()
+			return finalStatusRead[R](c, id)
+		case <-wake:
 		case <-time.After(interval):
 		}
 	}
+}
+
+// terminalOutcome maps a terminal workflow row to a GetResult return value.
+// The third return value reports whether the row was terminal at all.
+func terminalOutcome[R any](c *Context, id string, st *WorkflowStatus) (R, error, bool) {
+	switch st.Status {
+	case WorkflowStatusSuccess:
+		out, err := castOutput[R](st.Output, c)
+		return out, err, true
+	case WorkflowStatusError:
+		if st.Error != nil {
+			return zero[R](), wrapError(ErrAwaitedWorkflowFailed, st.Error, "workflow %s failed", id), true
+		}
+		return zero[R](), ErrAwaitedWorkflowFailedErr, true
+	case WorkflowStatusCancelled:
+		return zero[R](), ErrWorkflowCancelledErr, true
+	case WorkflowStatusMaxRecoveryAttemptsExceeded:
+		return zero[R](), ErrMaxAttemptsErr, true
+	}
+	return zero[R](), nil, false
+}
+
+// finalStatusRead is the last-gasp read used when the runtime context is
+// already cancelled (shutdown). It uses a short standalone context — the
+// runtime one would fail every query — so a result that was finalized just
+// before shutdown is still observable, matching the documented directHandle
+// fallback behavior.
+func finalStatusRead[R any](c *Context, id string) (R, error) {
+	rctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	st, err := c.systemDB.getWorkflowStatus(rctx, id, true)
+	if err == nil && st != nil {
+		if out, terr, terminal := terminalOutcome[R](c, id, st); terminal {
+			return out, terr
+		}
+	}
+	return zero[R](), c.ctx.Err()
 }
 
 func castOutcome[R any](o workflowOutcome, c *Context) (R, error) {
@@ -198,4 +240,3 @@ func zero[T any]() T {
 	var z T
 	return z
 }
-

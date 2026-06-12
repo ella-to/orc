@@ -28,11 +28,11 @@ type bookings struct {
 
 var state bookings
 
-func bookHotel() error      { state.hotelBooked = true; fmt.Println("  HOTEL  booked"); return nil }
-func bookFlight() error     { state.flightBooked = true; return errors.New("flight provider down") }
-func bookCar() error        { state.carBooked = true; fmt.Println("  CAR    booked"); return nil }
-func refundHotel() error    { state.hotelBooked = false; fmt.Println("  HOTEL  refunded"); return nil }
-func refundCar() error      { state.carBooked = false; fmt.Println("  CAR    refunded"); return nil }
+func bookHotel() error   { state.hotelBooked = true; fmt.Println("  HOTEL  booked"); return nil }
+func bookFlight() error  { state.flightBooked = true; return errors.New("flight provider down") }
+func bookCar() error     { state.carBooked = true; fmt.Println("  CAR    booked"); return nil }
+func refundHotel() error { state.hotelBooked = false; fmt.Println("  HOTEL  refunded"); return nil }
+func refundCar() error   { state.carBooked = false; fmt.Println("  CAR    refunded"); return nil }
 
 // bookTrip is a saga: at each step, if it fails, run compensations for
 // everything we've already done in reverse.

@@ -53,7 +53,9 @@ func registerScheduled(c *Context, entry *registryEntry, expr string) {
 		}
 		if res.AlreadyExisted {
 			c.logger.Debug("scheduled tick deduplicated", "name", entry.Name, "id", id)
+			return
 		}
+		c.core.wakeQueue()
 	})
 	if err != nil {
 		panic(fmt.Sprintf("orc: invalid cron expression %q: %v", expr, err))

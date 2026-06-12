@@ -98,9 +98,13 @@ func (s *sqliteSystemDB) insertWorkflow(ctx context.Context, in insertWorkflowIn
 	res := insertWorkflowResult{}
 	st := in.Status
 
-	inputStr, err := s.serializer.Encode(st.Input)
-	if err != nil {
-		return res, err
+	inputStr := in.EncodedInput
+	if inputStr == "" {
+		var err error
+		inputStr, err = s.serializer.Encode(st.Input)
+		if err != nil {
+			return res, err
+		}
 	}
 
 	var outStr any
@@ -125,7 +129,7 @@ func (s *sqliteSystemDB) insertWorkflow(ctx context.Context, in insertWorkflowIn
 	}
 
 	var inserted bool
-	err = s.db.Exec(ctx, func(ctx context.Context, conn *sqlite.Conn) (err error) {
+	err := s.db.Exec(ctx, func(ctx context.Context, conn *sqlite.Conn) (err error) {
 		defer conn.Save(&err)
 
 		// Try to insert; on conflict do nothing.
@@ -189,8 +193,16 @@ func (s *sqliteSystemDB) insertWorkflow(ctx context.Context, in insertWorkflowIn
 		return res, wrapError(ErrUnknown, err, "insert workflow")
 	}
 
-	// Read back to return the canonical row.
-	got, err := s.getWorkflowStatus(ctx, st.ID, true)
+	if inserted {
+		// Fresh row: what we wrote is canonical, no read-back needed.
+		res.Status = st
+		res.RawInput = inputStr
+		return res, nil
+	}
+
+	// Conflict no-op: read back the existing row (including the raw input
+	// text) so callers can compare for idempotency.
+	got, raw, err := s.getWorkflowStatusRaw(ctx, st.ID)
 	if err != nil {
 		return res, err
 	}
@@ -198,10 +210,48 @@ func (s *sqliteSystemDB) insertWorkflow(ctx context.Context, in insertWorkflowIn
 		return res, newError(ErrUnknown, "workflow row missing after insert: %s", st.ID)
 	}
 	res.Status = *got
-	res.AlreadyExisted = !inserted
-
-	_ = inputStr
+	res.RawInput = raw
+	res.AlreadyExisted = true
 	return res, nil
+}
+
+// getWorkflowStatusRaw is getWorkflowStatus(loadIO=true) plus the raw
+// (still-serialized) input text.
+func (s *sqliteSystemDB) getWorkflowStatusRaw(ctx context.Context, workflowID string) (*WorkflowStatus, string, error) {
+	var out *WorkflowStatus
+	var raw string
+	err := s.db.Exec(ctx, func(ctx context.Context, conn *sqlite.Conn) error {
+		stmt, err := conn.Prepare(ctx, `
+			SELECT workflow_uuid, status, name, output, error,
+			       executor_id, application_version, application_id,
+			       queue_name, deduplication_id, priority,
+			       timeout_ms, deadline_ms, delay_until_ms,
+			       created_at, updated_at, started_at_ms,
+			       attempts, input, forked_from, parent_workflow_id, cron_schedule
+			FROM workflow_status WHERE workflow_uuid = ?;`, workflowID)
+		if err != nil {
+			return err
+		}
+		defer stmt.Reset()
+		hasRow, err := stmt.Step()
+		if err != nil {
+			return err
+		}
+		if !hasRow {
+			return nil
+		}
+		ws, err := s.scanWorkflowRow(stmt, true)
+		if err != nil {
+			return err
+		}
+		raw = stmt.GetText("input")
+		out = ws
+		return nil
+	})
+	if err != nil {
+		return nil, "", wrapError(ErrUnknown, err, "get workflow status raw")
+	}
+	return out, raw, nil
 }
 
 func nullableStr(s string) any {
@@ -311,17 +361,27 @@ func listWorkflowsWhere(in listWorkflowsInput) (string, []any) {
 			args = append(args, string(st))
 		}
 	}
+	// Text filters: exact equality by default. The admin HTTP API opts in to
+	// substring matching (Fuzzy) for interactive search; internal callers
+	// (recovery, queue accounting) must never fuzzy-match — e.g. executor
+	// "node-1" must not pick up workflows owned by "node-10".
+	match := func(col, val string) {
+		if in.Fuzzy {
+			conds = append(conds, col+" LIKE ?")
+			args = append(args, "%"+val+"%")
+		} else {
+			conds = append(conds, col+" = ?")
+			args = append(args, val)
+		}
+	}
 	if in.WorkflowName != "" {
-		conds = append(conds, "name LIKE ?")
-		args = append(args, "%"+in.WorkflowName+"%")
+		match("name", in.WorkflowName)
 	}
 	if in.QueueName != "" {
-		conds = append(conds, "queue_name LIKE ?")
-		args = append(args, "%"+in.QueueName+"%")
+		match("queue_name", in.QueueName)
 	}
 	if in.ExecutorID != "" {
-		conds = append(conds, "executor_id LIKE ?")
-		args = append(args, "%"+in.ExecutorID+"%")
+		match("executor_id", in.ExecutorID)
 	}
 	if !in.StartTime.IsZero() {
 		conds = append(conds, "created_at >= ?")
@@ -837,8 +897,42 @@ func (s *sqliteSystemDB) getEvent(ctx context.Context, workflowID, key string) (
 // ---------- queues ----------
 
 func (s *sqliteSystemDB) dequeueWorkflows(ctx context.Context, in dequeueInput) ([]string, error) {
+	// Cheap read-only pre-check first: in steady state most queue ticks find
+	// nothing to dispatch, and skipping the write transaction (BEGIN
+	// IMMEDIATE) keeps idle polling off the SQLite writer lock. A row that
+	// lands between this check and the transaction below is simply picked up
+	// on the next tick.
+	hasWork := false
+	err := s.db.Exec(ctx, func(ctx context.Context, conn *sqlite.Conn) error {
+		stmt, err := conn.Prepare(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM workflow_status
+				WHERE queue_name = ?
+				  AND (status = ? OR (status = ? AND delay_until_ms <= ?))
+			) AS has_work;`,
+			in.QueueName, string(WorkflowStatusEnqueued), string(WorkflowStatusDelayed), nowMs())
+		if err != nil {
+			return err
+		}
+		defer stmt.Reset()
+		hasRow, err := stmt.Step()
+		if err != nil {
+			return err
+		}
+		if hasRow {
+			hasWork = stmt.GetInt64("has_work") > 0
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, wrapError(ErrUnknown, err, "dequeue pre-check")
+	}
+	if !hasWork {
+		return nil, nil
+	}
+
 	var ids []string
-	err := s.db.Exec(ctx, func(ctx context.Context, conn *sqlite.Conn) (err error) {
+	err = s.db.Exec(ctx, func(ctx context.Context, conn *sqlite.Conn) (err error) {
 		defer conn.Save(&err)
 
 		now := nowMs()
@@ -919,18 +1013,24 @@ func (s *sqliteSystemDB) recordQueueDispatch(ctx context.Context, queueName stri
 	return s.db.Exec(ctx, func(ctx context.Context, conn *sqlite.Conn) (err error) {
 		defer conn.Save(&err)
 		now := nowMs()
-		for _, id := range workflowIDs {
-			stmt, err := conn.Prepare(ctx, `
-				INSERT INTO queue_dispatch_log (queue_name, workflow_uuid, dispatched_at)
-				VALUES (?, ?, ?);`, queueName, id, now)
-			if err != nil {
-				return err
+		// Single multi-row INSERT instead of one statement per workflow.
+		var sb strings.Builder
+		sb.WriteString("INSERT INTO queue_dispatch_log (queue_name, workflow_uuid, dispatched_at) VALUES ")
+		args := make([]any, 0, len(workflowIDs)*3)
+		for i, id := range workflowIDs {
+			if i > 0 {
+				sb.WriteString(", ")
 			}
-			if _, err := stmt.Step(); err != nil {
-				return err
-			}
+			sb.WriteString("(?, ?, ?)")
+			args = append(args, queueName, id, now)
 		}
-		return nil
+		sb.WriteString(";")
+		stmt, err := conn.Prepare(ctx, sb.String(), args...)
+		if err != nil {
+			return err
+		}
+		_, err = stmt.Step()
+		return err
 	})
 }
 

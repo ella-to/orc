@@ -328,8 +328,8 @@ func TestExample_SagaCompensation(t *testing.T) {
 	c := newTestContext(t)
 
 	var (
-		bookedHotel atomic.Bool
-		bookedFlight atomic.Bool
+		bookedHotel   atomic.Bool
+		bookedFlight  atomic.Bool
 		hotelRefunded atomic.Bool
 	)
 

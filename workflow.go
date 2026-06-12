@@ -55,7 +55,11 @@ func WithWorkflowTimeout(d time.Duration) WorkflowOption {
 	return func(o *runWorkflowOptions) { o.timeout = d }
 }
 
-// WithWorkflowDelay delays an enqueued workflow's first dispatch.
+// WithWorkflowDelay delays the workflow's first dispatch by d. The delay is
+// durable: it is recorded as DELAYED in the database and survives restarts.
+// Without WithQueue the workflow is routed onto the internal queue so the
+// queue runner can promote it once the delay elapses; the returned handle is
+// a polling handle in that case.
 func WithWorkflowDelay(d time.Duration) WorkflowOption {
 	return func(o *runWorkflowOptions) { o.delay = d }
 }
@@ -115,14 +119,44 @@ func RunWorkflow[I any, O any](c *Context, fn any, input I, opts ...WorkflowOpti
 		return nil, wrapError(ErrWorkflowNotRegistered, nil, "workflow %s not registered", name)
 	}
 
-	// Capture parent workflow id if we're inside one.
-	if st := wfStateFromContext(c.ctx); st != nil {
-		opt.parentID = st.workflowID
+	// Spawning a workflow from inside another workflow is itself checkpointed
+	// as a step: the child's ID is recorded in operation_outputs so that a
+	// replayed parent re-attaches to the same child instead of spawning a
+	// duplicate. Without an explicit WithWorkflowID the child ID is derived
+	// deterministically from (parent ID, step ID).
+	parentState := wfStateFromContext(c.ctx)
+	childStepID := -1
+	if parentState != nil {
+		opt.parentID = parentState.workflowID
+		childStepID = parentState.takeStepID()
+		rec, err := c.systemDB.checkStepOutput(c.ctx, parentState.workflowID, childStepID)
+		if err != nil {
+			return nil, err
+		}
+		if rec != nil {
+			if rec.ChildWorkflowID == "" {
+				return nil, newError(ErrUnknown,
+					"workflow %s step %d replayed as a child workflow but was recorded as %q — workflow code must be deterministic",
+					parentState.workflowID, childStepID, rec.FunctionName)
+			}
+			return &pollingHandle[O]{id: rec.ChildWorkflowID, ctx: c}, nil
+		}
 	}
 
 	wfID := opt.workflowID
 	if wfID == "" {
-		wfID = newUUID()
+		if parentState != nil {
+			wfID = fmt.Sprintf("%s-%d", parentState.workflowID, childStepID)
+		} else {
+			wfID = newUUID()
+		}
+	}
+
+	// A delayed workflow relies on the queue runner to promote it once the
+	// delay elapses. Direct runs have no dispatcher, so route them onto the
+	// internal queue rather than silently ignoring the delay.
+	if opt.delay > 0 && opt.queueName == "" {
+		opt.queueName = internalQueueName
 	}
 
 	// Encode input and persist initial row.
@@ -132,9 +166,6 @@ func RunWorkflow[I any, O any](c *Context, fn any, input I, opts ...WorkflowOpti
 	}
 
 	status := WorkflowStatusEnqueued
-	if opt.queueName == "" {
-		status = WorkflowStatusEnqueued
-	}
 	if opt.delay > 0 {
 		status = WorkflowStatusDelayed
 	}
@@ -164,9 +195,24 @@ func RunWorkflow[I any, O any](c *Context, fn any, input I, opts ...WorkflowOpti
 		st.DelayUntil = now.Add(opt.delay)
 	}
 
-	res, err := c.systemDB.insertWorkflow(c.ctx, insertWorkflowInput{Status: st})
+	res, err := c.systemDB.insertWorkflow(c.ctx, insertWorkflowInput{Status: st, EncodedInput: inputStr})
 	if err != nil {
 		return nil, err
+	}
+
+	// Checkpoint the spawn in the parent so a replay re-attaches to this
+	// child. Recorded before execution starts: if we crash in between, the
+	// child row already exists and recovery (or the queue runner) picks it up.
+	recordChildStep := func() error {
+		if parentState == nil {
+			return nil
+		}
+		return c.systemDB.recordStepOutput(c.ctx, recordStepInput{
+			WorkflowID:      parentState.workflowID,
+			FunctionID:      childStepID,
+			FunctionName:    "orc.runWorkflow:" + entry.Name,
+			ChildWorkflowID: wfID,
+		})
 	}
 
 	// If the workflow already existed for this ID, the dbos rule is:
@@ -175,19 +221,26 @@ func RunWorkflow[I any, O any](c *Context, fn any, input I, opts ...WorkflowOpti
 	if res.AlreadyExisted {
 		// Compare names. We can't easily compare deeply-typed inputs, but the
 		// serialized form gives a strong-enough check.
-		existingInputEnc, _ := c.cfg.Serializer.Encode(res.Status.Input)
 		if res.Status.Name != entry.Name {
 			return nil, wrapError(ErrConflictingInput, nil, "workflow %s already exists with different name (%s vs %s)", wfID, res.Status.Name, entry.Name)
 		}
-		if existingInputEnc != inputStr {
+		if res.RawInput != inputStr {
 			return nil, wrapError(ErrConflictingInput, nil, "workflow %s already exists with different input", wfID)
+		}
+		if err := recordChildStep(); err != nil {
+			return nil, err
 		}
 		// Return a polling handle since we're attaching to an existing run.
 		return &pollingHandle[O]{id: wfID, ctx: c}, nil
 	}
 
+	if err := recordChildStep(); err != nil {
+		return nil, err
+	}
+
 	// If queued, hand back a polling handle and let the queue runner pick it up.
 	if opt.queueName != "" {
+		c.core.wakeQueue()
 		return &pollingHandle[O]{id: wfID, ctx: c}, nil
 	}
 
@@ -209,7 +262,7 @@ func RunWorkflow[I any, O any](c *Context, fn any, input I, opts ...WorkflowOpti
 		defer c.core.workflowsWg.Done()
 		defer c.core.active.Delete(wfID)
 		defer cancel(nil)
-		runWorkflowExecution(c, entry, wfID, inputStr, resultCh, wfCtx)
+		runWorkflowExecution(c, entry, wfID, inputStr, resultCh, wfCtx, st.Timeout, st.Deadline)
 	}()
 
 	return &directHandle[O]{id: wfID, ctx: c, result: resultCh}, nil
@@ -238,7 +291,11 @@ func watchCallerContext(callerCtx, wfCtx context.Context, cancel context.CancelC
 // wfCtx is the per-workflow context.Context derived from the executor context.
 // It can be cancelled via the activeWorkflow.cancel func to interrupt blocking
 // operations inside steps.
-func runWorkflowExecution(c *Context, entry *registryEntry, wfID, inputStr string, resultCh chan workflowOutcome, wfCtx context.Context) {
+//
+// timeout/deadline come from the caller's already-loaded workflow row so we
+// don't re-query the database on every execution. A non-zero deadline wins;
+// otherwise a non-zero timeout counts from when execution starts.
+func runWorkflowExecution(c *Context, entry *registryEntry, wfID, inputStr string, resultCh chan workflowOutcome, wfCtx context.Context, timeout time.Duration, deadline time.Time) {
 	defer func() {
 		if r := recover(); r != nil {
 			err := fmt.Errorf("orc: workflow panic: %v", r)
@@ -267,12 +324,10 @@ func runWorkflowExecution(c *Context, entry *registryEntry, wfID, inputStr strin
 
 	subCtx := wfCtx
 	var cancel context.CancelFunc
-	// Apply timeout if set on the row.
-	rowSt, _ := c.systemDB.getWorkflowStatus(c.ctx, wfID, false)
-	if rowSt != nil && rowSt.Timeout > 0 {
-		dl := rowSt.StartedAt.Add(rowSt.Timeout)
-		if !rowSt.Deadline.IsZero() {
-			dl = rowSt.Deadline
+	if !deadline.IsZero() || timeout > 0 {
+		dl := deadline
+		if dl.IsZero() {
+			dl = now.Add(timeout)
 		}
 		subCtx, cancel = context.WithDeadline(wfCtx, dl)
 		defer cancel()
@@ -378,6 +433,8 @@ func finalizeWorkflow(c *Context, _ *registryEntry, wfID string, encOut string, 
 	if err := c.systemDB.updateWorkflowStatus(c.ctx, in); err != nil {
 		c.logger.Error("failed to finalize workflow", "workflow_id", wfID, "err", err)
 	}
+	// Wake any in-process GetResult waiters immediately.
+	c.core.hub.signal(workflowDoneKey(wfID))
 }
 
 // ---------- Steps ----------
@@ -386,11 +443,11 @@ func finalizeWorkflow(c *Context, _ *registryEntry, wfID string, encOut string, 
 type StepOption func(*stepOptions)
 
 type stepOptions struct {
-	name        string
-	maxRetries  int
-	baseDelay   time.Duration
-	maxDelay    time.Duration
-	backoffMul  float64
+	name       string
+	maxRetries int
+	baseDelay  time.Duration
+	maxDelay   time.Duration
+	backoffMul float64
 }
 
 // WithStepName overrides the step name (defaults to the function's FQN).
@@ -507,8 +564,16 @@ func RunAsStep[T any](c *Context, fn StepFunc[T], opts ...StepOption) (T, error)
 		in.ErrorString = &es
 	}
 	if err := c.systemDB.recordStepOutput(c.ctx, in); err != nil {
-		// Best-effort: log and propagate.
 		c.logger.Error("record step output failed", "workflow_id", st.workflowID, "step", stepID, "err", err)
+		if lastErr != nil {
+			// The step failed anyway; surface the step's own error. The replay
+			// will re-run the step, which is acceptable for a failed attempt.
+			return result, lastErr
+		}
+		// The step succeeded but its checkpoint was not persisted. Letting the
+		// workflow continue would re-execute this step on replay — fail loudly
+		// instead so the run is retried from a consistent state.
+		return zero[T](), wrapError(ErrUnknown, err, "failed to checkpoint step %d (%s)", stepID, o.name)
 	}
 
 	return result, lastErr
@@ -546,7 +611,7 @@ func runRegisteredWorkflowFromDB(c *Context, status WorkflowStatus) (WorkflowHan
 		defer c.core.workflowsWg.Done()
 		defer c.core.active.Delete(status.ID)
 		defer cancel(nil)
-		runWorkflowExecution(c, entry, status.ID, encInput, resultCh, wfCtx)
+		runWorkflowExecution(c, entry, status.ID, encInput, resultCh, wfCtx, status.Timeout, status.Deadline)
 	}()
 
 	return &directHandle[any]{id: status.ID, ctx: c, result: resultCh}, nil

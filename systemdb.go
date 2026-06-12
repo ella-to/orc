@@ -53,6 +53,9 @@ type systemDatabase interface {
 type insertWorkflowInput struct {
 	Status             WorkflowStatus
 	MaxRecoveryAttempt int
+	// EncodedInput, when non-empty, is the already-serialized form of
+	// Status.Input; the DB layer persists it as-is instead of re-encoding.
+	EncodedInput string
 }
 
 type insertWorkflowResult struct {
@@ -61,6 +64,9 @@ type insertWorkflowResult struct {
 	// AlreadyExisted to decide whether to schedule execution.
 	Status         WorkflowStatus
 	AlreadyExisted bool
+	// RawInput is the serialized input text of the row in the DB. Callers use
+	// it for exact idempotency comparisons without re-encoding.
+	RawInput string
 }
 
 type updateWorkflowStatusInput struct {
@@ -105,6 +111,11 @@ type listWorkflowsInput struct {
 	LoadInputOutput   bool
 	WithChildren      bool
 	ExcludeQueueNames []string
+	// Fuzzy switches WorkflowName / QueueName / ExecutorID filters from exact
+	// equality to substring (LIKE) matching. Only the admin HTTP API sets it;
+	// internal callers (recovery, queue accounting, cancel poller) rely on
+	// exact matches for correctness.
+	Fuzzy bool
 }
 
 type stepRecord struct {

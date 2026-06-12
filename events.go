@@ -17,11 +17,15 @@ func SetEvent(c *Context, key string, value any) error {
 		return err
 	}
 	_, runErr := RunAsStep(c, func(_ context.Context) (struct{}, error) {
-		return struct{}{}, c.systemDB.setEvent(c.ctx, setEventInput{
+		err := c.systemDB.setEvent(c.ctx, setEventInput{
 			WorkflowID: st.workflowID,
 			Key:        key,
 			Value:      enc,
 		})
+		if err == nil {
+			c.core.hub.signal(eventKey(st.workflowID, key))
+		}
+		return struct{}{}, err
 	}, WithStepName("orc.setEvent:"+key))
 	return runErr
 }
@@ -46,6 +50,13 @@ func GetEvent[T any](c *Context, workflowID, key string, timeout time.Duration) 
 
 func pollGetEvent[T any](c *Context, workflowID, key string, deadline time.Time) (T, error) {
 	interval := c.cfg.NotificationPollInterval
+
+	// Subscribe before the first poll so an in-process SetEvent between the
+	// poll and the wait is never missed; the DB poll covers other processes.
+	hubKey := eventKey(workflowID, key)
+	wake := c.core.hub.subscribe(hubKey)
+	defer c.core.hub.unsubscribe(hubKey, wake)
+
 	for {
 		rec, err := c.systemDB.getEvent(c.ctx, workflowID, key)
 		if err != nil {
@@ -67,6 +78,7 @@ func pollGetEvent[T any](c *Context, workflowID, key string, deadline time.Time)
 		select {
 		case <-c.ctx.Done():
 			return zero[T](), c.ctx.Err()
+		case <-wake:
 		case <-time.After(interval):
 		}
 	}
