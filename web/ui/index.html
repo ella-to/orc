@@ -41,6 +41,30 @@
       * {
         box-sizing: border-box;
       }
+      * {
+        scrollbar-width: thin;
+        scrollbar-color: color-mix(in srgb, var(--muted) 72%, var(--border))
+          var(--panel-2);
+      }
+      *::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+      *::-webkit-scrollbar-track {
+        background: var(--panel-2);
+        border-radius: 999px;
+      }
+      *::-webkit-scrollbar-thumb {
+        background: color-mix(in srgb, var(--muted) 55%, var(--border));
+        border: 2px solid var(--panel-2);
+        border-radius: 999px;
+      }
+      *::-webkit-scrollbar-thumb:hover {
+        background: color-mix(in srgb, var(--muted) 80%, var(--accent));
+      }
+      *::-webkit-scrollbar-corner {
+        background: var(--panel-2);
+      }
       html,
       body {
         height: 100%;
@@ -444,7 +468,7 @@
       .result-card__copy {
         position: absolute;
         top: 6px;
-        right: 6px;
+        right: 18px;
         z-index: 2;
         display: inline-flex;
         align-items: center;
@@ -500,7 +524,7 @@
         margin: 0;
         max-height: 220px;
         overflow: auto;
-        padding-right: 2.25rem;
+        padding-right: 3.25rem;
       }
 
       .result-card__code-body[data-collapsed-max-height] {
@@ -915,7 +939,9 @@
             "attempts",
             "duration",
           ];
-          const rawSortBy = (u.searchParams.get("sort_by") || "created").toLowerCase();
+          const rawSortBy = (
+            u.searchParams.get("sort_by") || "created"
+          ).toLowerCase();
           const sortBy = allowedSortBy.includes(rawSortBy)
             ? rawSortBy
             : "created";
