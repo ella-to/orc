@@ -50,7 +50,7 @@ in-flight workflows from their last checkpoint when it next launches.
 ## Installation
 
 ```bash
-go get ella.to/orc@v0.0.2
+go get ella.to/orc@v0.0.3
 ```
 
 `orc` is developed and tested on Go 1.25. Earlier versions may work as long
